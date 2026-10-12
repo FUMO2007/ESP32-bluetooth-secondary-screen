@@ -99,14 +99,52 @@ PC 端连上后自动进数据页。
 .\build.cmd -Quick     # 跳过最慢的 UI 仿真
 ```
 
-八步全绿才算通过：金标向量同步 → 协议跨语言比对（Python 编码 / C++ 解码）→
-固件语法检查 + 引脚表自检 → PC 端逻辑测试 → **离线 UI 仿真与像素级断言**。
+九步全绿才算通过：金标向量同步 → 协议跨语言比对（Python 编码 / C++ 解码）→
+PresentMon 校验 → 固件语法检查 + 引脚表自检 → PC 端逻辑测试 →
+**离线 UI 仿真与像素级断言** → 真机工具链编译 → 部署副本一致性。
+
+其中**第 9 步只报警告、不算失败**：部署目录（`../PC端/`）是运行现场而不是仓库的一部分，
+它落后于仓库是正常状态。这一步的作用是把漂移说出来，提醒你跑 `deploy.cmd` 同步。
 
 > 有些机器（开发这台就是）启用了代码完整性策略，会拒绝执行**被编辑过的 `.ps1`**，
 > 报的还是一句很有误导性的 `The file ... is not digitally signed` —— 这与脚本内容
 > 无关，是 Windows 在判断"文件来源可不可信"。遇到它就用 `build.cmd`
 > （内部已带 `-ExecutionPolicy Bypass`，只对本次进程生效、不改机器上的任何设置）；
 > 完整证据写在 [`build.ps1`](build.ps1) 头部。
+
+### 4. 打包好的 exe（可选）
+
+不想装 Python 的话，用打包好的 PC 端程序：**从
+[Releases](https://github.com/FUMO2007/ESP32-bluetooth-secondary-screen-/releases)
+下载 `pc_monitor_libre.exe`**（onefile，约 17 MB）。
+
+**它自带全部依赖**：Python 解释器、psutil / bleak / pythonnet，以及
+`dlls/` 里那 29 个托管 DLL 与 PresentMon —— **目标机器不需要装 Python，
+也不需要另外拷 `dlls\`**，把这一个文件拿过去就能跑。
+
+用法和注意事项：
+
+- **放在可写目录**（桌面、下载、自建文件夹都行）。程序会在自己旁边写
+  `pc_monitor.log`；放 `C:\Program Files\` 会写不进去。
+- 第一次运行多半会弹一次 UAC：PresentMon 起 ETW 会话、以及 AMD 平台的
+  Tctl 温度都需要管理员权限。**取消 UAC 不会崩**，会继续以普通权限运行，
+  只是这些读数显示 `--`。
+- 目标机器需要 **Windows x64 + .NET Framework 4.x**（Win10/11 自带）
+  和**蓝牙 4.0+ 适配器**。
+- 想改参数不用重新打包：把 [`pc_side/pc_monitor.ini.sample`](pc_side/pc_monitor.ini.sample)
+  复制成 exe 旁边的 `pc_monitor.ini` 即可。
+
+自己重新打包：
+
+```powershell
+python -m pip install pyinstaller==6.21.0
+pyinstaller --clean --noconfirm pc_monitor_libre.spec   # 产物在 dist/
+```
+
+> **exe 为什么不入库。** 它是 17 MB 的二进制：每重新打包提交一次，就往 git 历史里
+> **永久**再加 17 MB，而改一行 PC 端代码就多一份 —— clone 越来越慢且无法回收。
+> 所以 `dist/` 已被 [`.gitignore`](.gitignore) 忽略，发布走 Releases（附件不占 git 历史）。
+> 想要的一定是最新代码，请用上面第 1 步直接跑源码；exe 始终滞后于源码。
 
 ---
 
@@ -133,12 +171,16 @@ tools/               开发期工具
   make_logo.py       把品牌字渲染成 8 位 alpha 位图（内置字体没有汉字字形）
   probe_*.py         各层探针（传感器 / 网络 / 帧率），排查"屏幕上是 --"用
 
-libraries/TFT_eSPI/  第三方库（整库拷贝，MIT）
+libraries/TFT_eSPI/  第三方库（MIT；**已删除 examples/**，见 .gitignore 末尾的说明）
 vendor/              PresentMon（MIT，随包分发，见 vendor/README.md）
 
-build.ps1 / build.cmd     一键构建 + 验证（8 步，检查每步退出码）
+build.ps1 / build.cmd     一键构建 + 验证（9 步，检查每步退出码）
+.github/workflows/        CI：在 Linux runner 上跑跨平台可验证的那几步
 deploy.ps1 / deploy.cmd   把工作区同步到实际运行目录（哈希校验）
 PROTOCOL.md               PC ⇄ ESP32 协议（字段表、缩放、无效值语义）
+LICENSE                   本项目许可（MIT）；第三方许可见上方"第三方组件与许可"
+
+dist/                     打包好的 PC 端 exe（构建产物，见"快速开始"第 4 步）
 ```
 
 ---
@@ -168,6 +210,10 @@ FPS 这一项**只报实测值**，拿不到就是 `--`：曾经有过一条"按
 | PresentMon 2.6.0 | MIT | `vendor/PresentMon-2.6.0-x64.exe`（随包分发，见 `vendor/README.md`） |
 | LibreHardwareMonitorLib | MPL-2.0 | **不在仓库里**，需自行取得放进 `dlls/` |
 
-本项目自身的许可**尚未选定**（作者保留所有权利）。如果要允许别人使用/修改/分发，
-建议加一个 `LICENSE` 文件：MIT 或 Apache-2.0 都可以，两者与上面那两个 MIT 组件兼容。
-（`libraries/TFT_eSPI/` 与 `vendor/` 里各自的许可不受本项目许可选择的影响，需原样保留。）
+**本项目自身**以 [MIT 许可](LICENSE) 发布（Copyright © 2026 Fumo2007），
+可自由使用、修改、分发，保留版权与许可声明即可。
+
+上面各第三方组件**不受本项目许可影响**，各自的许可原样保留：
+`libraries/TFT_eSPI/license.txt` 与 `vendor/` 里的说明都留在原处。
+如果把打包好的 exe 分发出去，记得按 [`vendor/README.md`](vendor/README.md) 的
+"许可合规"一节把 PresentMon 的许可文本一并附上。
