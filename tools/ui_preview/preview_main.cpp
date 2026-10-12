@@ -305,6 +305,30 @@ int main() {
   }
   simSaveBmp("boot_4_data_after.bmp");
 
+  // ---- 刚连上先给概览页一整轮（PAGE_MS=9s），期间告警不跳页 ----
+  //  用户实测："一连上就跳到第二页"。原因是连上的那一刻温度已经越线（刚打完游戏，
+  //  GPU/CPU 还烫着），告警跳页立刻把人从概览页拉去散热页。现在头 9 秒按住跳页，
+  //  窗口结束后照常跳（红色数值 + 边框呼吸从头到尾都在，不是把告警藏起来）。
+  //  注入用 hddTemp（越过 ALARM_HDD_TEMP=70）：它不进"自开机极值"的统计，
+  //  不会污染后面几张预览图上的 PEAK 数值。
+  const int graceFrames = (int)(PAGE_MS / 200);      // 9s / 200ms = 45 帧
+  for (int f = 0; f < graceFrames - 1; f++) {        // 窗口内（到 8.8s）
+    publish(60 + f); g_data.hddTemp = 85.0f;
+    simAdvanceMs(200); loop();
+  }
+  int pgInWindow = detectDotPage();
+  for (int f = 0; f < 8; f++) {                      // 越过 9 秒窗口
+    publish(200 + f); g_data.hddTemp = 85.0f;
+    simAdvanceMs(200); loop();
+  }
+  int pgAfterWindow = detectDotPage();
+  printf("  刚连上就报警（注入 hddTemp=85，阈值 %g°C）：窗口内所在页 = %d（期望 1：不跳页）\n",
+         (double)ALARM_HDD_TEMP, pgInWindow);
+  printf("  窗口结束后所在页 = %d（期望 2：告警照常跳页）\n", pgAfterWindow);
+  if (pgInWindow != 1 || pgAfterWindow != 2) {
+    bootBad++; printf("  !! 连上后的告警免打扰窗口不对\n");
+  }
+
   printf("  %s\n", bootBad ? "  !! 开机画面有失败项" : "  开机画面全部通过");
 
 #if FORCE_PAGE
@@ -427,6 +451,10 @@ int main() {
   printf("\n--- 翻页结构 ---\n");
   printf("  四页都出现过：概览=%d 散热=%d 趋势=%d IO=%d（期望 1 1 1 1）\n",
          seen[1], seen[2], seen[3], seen[4]);
+  // 这一行以前只打印不断言：轮播/跳过逻辑改坏了它会照样绿。
+  if (!seen[1] || !seen[2] || !seen[3] || !seen[4]) {
+    printf("  !! 有页面一次都没出现过（轮播或 pageHasData 跳过逻辑有问题）\n");
+  }
 
   // ---------------- 频闪修复验证 ----------------
   printf("\n--- 行轮播验证（每 ROT_MS=5s=25 帧 换一档）---\n");

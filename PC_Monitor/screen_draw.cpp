@@ -1414,10 +1414,22 @@ void drawMainUI() {
   static bool lastAlarm = false;
   static uint8_t lastWant = P_OVERVIEW;
   static uint32_t pinUntilMs = 0;
+  static uint32_t dataStartMs = 0;
 
-  if (anyAlarm && (!lastAlarm || want != lastWant)) pinUntilMs = c.now + ALARM_PIN_MS;
-  bool pinned = anyAlarm && (int32_t)(pinUntilMs - c.now) > 0;
-  lastAlarm = anyAlarm;
+  // 刚进数据页的第一个 PAGE_MS 里不跳页：先让概览页完整显示一轮。
+  //  为什么：连上的那一刻往往温度已经越线（刚打完游戏，GPU/CPU 还烫着），
+  //  于是"告警跳页"会立刻把刚等完开机画面的用户拉去散热页 —— 实测反馈过这一幕。
+  //  做法是把窗口内的告警状态**按住**（当作还没告警）：窗口一结束它就算"新出现的
+  //  告警"，再照常钉 ALARM_PIN_MS。红色数值和卡片边框呼吸从头到尾都在，
+  //  所以不是把告警藏起来，只是不让它抢走刚连上时的那一眼。
+  if (firstRun) dataStartMs = c.now;              // 首帧 = 刚进数据页
+  bool graceWindow = (uint32_t)(c.now - dataStartMs) < PAGE_MS;
+
+  if (anyAlarm && !graceWindow && (!lastAlarm || want != lastWant)) {
+    pinUntilMs = c.now + ALARM_PIN_MS;
+  }
+  bool pinned = anyAlarm && !graceWindow && (int32_t)(pinUntilMs - c.now) > 0;
+  lastAlarm = graceWindow ? false : anyAlarm;
   lastWant  = want;
 
   bool pageSwitched = false;
