@@ -3,7 +3,6 @@
 
 BLEServer *bleServer = nullptr;
 BLECharacteristic *writeChar = nullptr;
-BLECharacteristic *notifyChar = nullptr;
 
 // ---------------- 数据发布 ----------------
 // BLE 回调（蓝牙任务）写入 dataPack，主循环（loopTask）读取，
@@ -192,14 +191,11 @@ void bleInit() {
     BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
   );
   writeChar->setCallbacks(new CharCallback());
-  
-  // 通知特征
-  notifyChar = service->createCharacteristic(
-    "beb5483e-36e1-4688-b7f5-ea07361b26a9",
-    BLECharacteristic::PROPERTY_NOTIFY
-  );
-  notifyChar->addDescriptor(new BLE2902());
-  
+
+  // 注：这里原来还建了一个 NOTIFY 特征（...26a9，带 BLE2902 描述符），但从来没有
+  // 被写过值 —— 数据流是单向的（PC → 屏幕），固件不需要回传任何东西。
+  // 已删除：省下一个特征槽位和它的 CCCD 描述符，也少一份"以后有人以为它能用"的误解。
+
   service->start();
 
   BLEAdvertising *adv = BLEDevice::getAdvertising();
