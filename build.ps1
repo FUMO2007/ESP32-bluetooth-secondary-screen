@@ -5,6 +5,18 @@
 #  以前的问题是：构建/测试命令散落在 README 和 pc_side/README.md 里，
 #  跑完只看屏幕输出，失败了也照样往下走（尤其 preview.exe 永远返回 0）。
 #
+#  ⚠ 如果看到「The file ... is not digitally signed. You cannot run this script」：
+#    本机有活动的代码完整性策略（C:\Windows\System32\CodeIntegrity\CiPolicies\Active
+#    下有 .cip 策略），**新建或被编辑过的 .ps1 会被拒绝执行**，而且报的是上面那句
+#    很有误导性的话。实测可以确认它和脚本内容无关：
+#      · 一直没动过的 deploy.ps1 能跑
+#      · 拿它做一个字节完全相同的副本、只改文件名 —— 就被拦
+#      · 这个文件被编辑器改写一次之后，同样被拦
+#    也就是说 Windows 判的是"这个文件来源可不可信"。加 -ExecutionPolicy Bypass
+#    只对本次进程跳过这层检查，不改机器上的任何设置。两种办法：
+#      build.cmd                                   # 同目录的一键入口，已经带上了
+#      powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
+#
 #  用法（两种 PowerShell 都行）：
 #     powershell -NoProfile -File build.ps1     # Windows PowerShell 5.1（本机只有这个）
 #     pwsh -NoProfile -File build.ps1           # PowerShell 7+（装了才用）
@@ -286,7 +298,7 @@ if (-not $CliPath) {
     Write-Host "------------------------------" -ForegroundColor DarkGray
     Write-Host "   [SKIP] 找不到 arduino-cli" -ForegroundColor Yellow
     Write-Host "          宿主机语法检查用的是 tools/ui_preview 的桩头，只能验证" -ForegroundColor Yellow
-    Write-Host "          \"签名和自写桩一致\"，替代不了真机编译。" -ForegroundColor Yellow
+    Write-Host "          「签名和自写桩一致」，替代不了真机编译。" -ForegroundColor Yellow
     Write-Host "          装上就会自动启用：" -ForegroundColor Gray
     Write-Host "            winget install ArduinoSA.CLI" -ForegroundColor Gray
     Write-Host "            arduino-cli core install esp32:esp32   # 开发用 core 3.3.10" -ForegroundColor Gray

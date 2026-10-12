@@ -10,9 +10,19 @@
 > PC 端逻辑测试和本仿真全部跑一遍，**并且检查每一步的退出码**：
 >
 > ```powershell
+> .\build.cmd          # 全部（推荐入口，见下方"注意"）
+> .\build.cmd -Quick   # 跳过本仿真
+>
+> # 等价写法（可能被执行策略拦下，见"注意"）：
 > powershell -NoProfile -File build.ps1          # 全部
 > powershell -NoProfile -File build.ps1 -Quick   # 跳过本仿真
 > ```
+>
+> **注意（本机实测）：** 直接跑 `powershell -File build.ps1` 可能报
+> `The file ... is not digitally signed` —— 本机有活动的代码完整性策略，
+> **新建或被编辑过的 .ps1 会被拒绝执行**，与脚本内容无关（一直没动过的
+> `deploy.ps1` 能跑，它的字节副本却不能）。`build.cmd` 已经带上
+> `-ExecutionPolicy Bypass`，直接用它即可；原因与验证写在 `build.ps1` 头部。
 >
 > 产物落在 `build_out/`（不再覆盖仓库里已提交的 exe / bmp）。
 >

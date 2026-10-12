@@ -18,9 +18,20 @@
 **推荐直接跑仓库根目录的一键脚本**，它会把下面这些全部跑一遍并检查每一步的退出码：
 
 ```powershell
+.\build.cmd              # 全部（含 UI 仿真）—— 推荐入口，见下面的"注意"
+.\build.cmd -Quick       # 跳过最慢的 UI 仿真
+
+# 直接用 build.ps1 也行（等价，但可能被拦，见"注意"）：
 powershell -NoProfile -File build.ps1          # 全部（含 UI 仿真）
 powershell -NoProfile -File build.ps1 -Quick   # 跳过最慢的 UI 仿真
 ```
+
+> **注意（本机实测）：** 直接跑 `powershell -File build.ps1` 可能被拦下来，报
+> `The file ... is not digitally signed`。这不是脚本坏了：本机有活动的代码完整性
+> 策略，**新建或被编辑过的 .ps1 会被拒绝执行** —— 一直没动过的 `deploy.ps1` 能跑，
+> 但它的字节副本、以及改过一次的 `build.ps1` 都会被拦，与脚本内容无关。
+> `-ExecutionPolicy Bypass` 只对本次进程跳过这层检查（不改机器设置），
+> `build.cmd` 已经带上了这个开关。详细说明见 `build.ps1` 头部。
 
 想单独跑某一步时：
 
