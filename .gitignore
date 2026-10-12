@@ -13,6 +13,17 @@ build_out/
 tools/ui_preview/*.exe
 tools/ui_preview/*.bmp
 
+# ---- 打包产物（dist/pc_monitor_libre.exe）----
+# **故意不入库**：它是 17 MB 的二进制，每次重新打包提交一次就会往 git 历史里
+# 永久再加 17 MB，而且改一行 PC 端代码就多一份。发布走 GitHub Releases ——
+# Release 的附件不占 git 历史。取得方式见 README 的"打包好的 exe"。
+# （曾经入库过一次，已在推送前撤出。）
+dist/
+
+# ---- test_pc_side.py 在崩溃/中断时残留的临时目录 ----
+mei_*/
+local_*/
+
 # ---- Python 缓存 ----
 __pycache__/
 *.pyc
@@ -49,5 +60,13 @@ desktop.ini
 #    vendor/PresentMon-2.6.0-x64.exe   真帧率的唯一来源，spec 会打进 exe（MIT，可分发）
 #    tools/ui_preview/*.png            README 引用的页面预览图（几 KB）
 #    tools/ui_preview/golden_vectors.h 跨语言金标契约，由 test_proto.py 生成并校验
-#    libraries/TFT_eSPI/               整库拷贝，固件构建依赖它
+#    libraries/TFT_eSPI/               固件构建依赖它（**但 examples/ 已删除**，见下）
 # ============================================================================
+
+# 关于 libraries/TFT_eSPI/examples/：
+#   上游库自带 313 个示例文件、28.6 MB，占整个 vendored 库的 89%，而本项目
+#   **一个都不会编译** —— tft_setup.h 用 USER_SETUP_ID 让库优先加载 sketch 目录下的
+#   配置，编译只取库根 + Processors + Fonts + TFT_Drivers + Extensions。
+#   所以删掉了它们（仓库 62 MB -> 约 22 MB，跟踪文件 652 -> 339）。
+#   原始快照留在本地分支 `backup-tft-espi-examples` 里，需要时可取回；
+#   也可以直接从上游 https://github.com/Bodmer/TFT_eSPI 的 v2.5.43 tag 重新下载。

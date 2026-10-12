@@ -11,10 +11,16 @@ import sys
 import time
 
 os.environ['PCMON_NO_HIDE'] = '1'
-sys.path.insert(0, r'D:\PC_Monitor\PC端')
+
+# 从本仓库的 pc_side/ 导入（不写死开发机路径，见 probe_sensors.py 的说明）
+_REPO_PC_SIDE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'pc_side')
+sys.path.insert(0, _REPO_PC_SIDE if os.path.isdir(_REPO_PC_SIDE) else os.getcwd())
 
 import psutil                                        # noqa: E402
-import pc_monitor_libre as m                          # noqa: E402
+try:
+    import pc_monitor_v2 as m                         # noqa: E402  # 仓库内
+except ImportError:
+    import pc_monitor_libre as m                      # noqa: E402  # 部署目录内
 
 
 async def probe(host, port, tries=4):

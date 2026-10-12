@@ -27,12 +27,19 @@
 # ============================================================================
 [CmdletBinding()]
 param(
-    [string]$Target = 'D:\PC_Monitor\PC端',
+    # 部署目录。留空 = 取仓库旁边同级目录里的 PC端\；也可以显式指定运行现场。
+    #
+    # 为什么默认值在这里算、而不写在 param 里：Windows PowerShell 5.1 在**参数绑定阶段**
+    # $PSScriptRoot 和 $PSCommandPath 都还是空的，写进默认值会拿到空串并报
+    # "Cannot bind argument to parameter 'Path' because it is an empty string"（已实测两次）。
+    # 绑定之后这两个变量才有值，所以挪到下面算。
+    [string]$Target,
     [switch]$WhatIf
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
+if (-not $Target) { $Target = Join-Path (Split-Path $Root -Parent) 'PC端' }
 $failed = 0
 
 # 源 -> 目标文件名。注意主要脚本在部署时要改名。

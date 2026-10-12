@@ -1,0 +1,104 @@
+# ============================================================================
+#  CI —— 在 Linux runner 上跑「跨平台可验证」的那几步
+# ----------------------------------------------------------------------------
+#  为什么不是直接跑 build.ps1：
+#    build.ps1 是给 Windows 开发机用的（cmd 重定向、.exe 后缀、PS 5.1 代码完整性
+#    策略那套说明），在 Linux 上那些地方跑不通。这里把其中**与平台无关**的命令
+#    按同样参数重跑一遍，参数与 build.ps1 保持一致（改一边记得改另一边）。
+#
+#  覆盖的是最容易悄悄回归的部分：**协议两端一致性**。
+#    · 金标向量：test_proto.py 是唯一来源，C++ 侧只负责解码比对
+#    · 跨语言：Python 编码 -> C++ 解码，逐字段比 raw
+#    · 固件语法：-Wall -Wextra 零警告（走 tools/ui_preview 的桩头）
+#    · 引脚表：tft_setup.h 的 static_assert 不变量
+#    · UI 仿真：真实渲染代码跑在内存帧缓冲上做像素级断言
+#
+#  **没**覆盖（需要 Windows / 真机，留给本地 build.ps1）：
+#    · PresentMon SHA256 校验、PC 端逻辑测试（ctypes/Job Object，Windows 专用）
+#    · arduino-cli 真机编译、部署副本一致性检查
+# ============================================================================
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装 Python 依赖
+        # test_proto.py 只用到标准库；psutil/bleak 是为了让与 build.ps1 同构的
+        # 环境保持一致（真正需要它们的是 Windows 专有的 test_pc_side.py）。
+        run: python -m pip install --upgrade pip psutil==7.2.2 bleak==3.0.2
+
+      # ---------------------------------------------------------------- 1) 金标向量
+      # 顺序很重要：**先 check 再生成**。反过来的话刚写出的文件当然是最新的，
+      # 那个检查永远不会失败，等于没有（build.ps1 里专门记着这个教训）。
+      - name: 1) 检查金标向量是否已同步
+        run: python -B pc_side/test_proto.py --check
+
+      - name: 2) 重新生成金标向量 + 协议自检
+        run: python -B pc_side/test_proto.py
+
+      # ---------------------------------------------------------------- 3) 固件语法
+      - name: 3) 固件语法检查 + 引脚表自检 (-Wall -Wextra)
+        run: |
+          set -e
+          INC="-I tools/ui_preview -I PC_Monitor"
+          COMMON="-std=gnu++11 -fsyntax-only -Wall -Wextra $INC"
+          g++ $COMMON PC_Monitor/screen_draw.cpp
+          g++ $COMMON PC_Monitor/ble_service.cpp
+          g++ $COMMON -x c++ PC_Monitor/PC_Monitor.ino
+          g++ $COMMON tools/tft_setup_check.cpp
+
+      # ---------------------------------------------------------------- 4) 跨语言协议
+      - name: 4) 协议跨语言测试 (Python 编码 -> C++ 解码)
+        run: |
+          set -e
+          g++ -std=gnu++11 -Wall -Wextra -I tools/ui_preview -I PC_Monitor \
+              tools/ui_preview/proto_test.cpp PC_Monitor/proto.cpp \
+              -o build_out/proto_test
+          ./build_out/proto_test
+
+      # ---------------------------------------------------------------- 5) UI 仿真
+      # -DFORCE_PAGE=0 必须带：config.h 的调试开关默认可能钉死某一页，
+      # 那样翻页类断言会全部失效。
+      - name: 5) UI 仿真渲染 + 画面断言
+        run: |
+          set -e
+          g++ -std=gnu++11 -O0 -DFORCE_PAGE=0 -I tools/ui_preview -I PC_Monitor \
+              tools/ui_preview/preview_impl.cpp tools/ui_preview/preview_main.cpp \
+              PC_Monitor/screen_draw.cpp PC_Monitor/proto.cpp \
+              -x c++ PC_Monitor/PC_Monitor.ino \
+              -o build_out/preview
+          cd build_out && ./preview > report.txt 2>&1 || true
+
+      - name: 5b) 读 UI 仿真报告
+        # preview 自身永远返回 0（preview_main.cpp 正常路径无条件 return 0），
+        # 退出码没有信息量 —— 按 tools/ui_preview/README.md 的约定读报告：
+        # 任何 "!!" 开头的行都是失败；结论行形如「结论：通过」。
+        run: |
+          set -e
+          report=build_out/report.txt
+          test -f "$report" || { echo "preview 没有产出 report.txt"; exit 1; }
+          echo "----- 仿真报告（尾部） -----"
+          tail -n 25 "$report"
+          if grep -qE '^[[:space:]]*!!' "$report"; then
+            echo "::error::UI 仿真报告里有失败项（!! 开头的行）"
+            grep -nE '^[[:space:]]*!!' "$report"
+            exit 1
+          fi
+          if grep -E '^[[:space:]]*结论' "$report" | tail -n 1 | grep -q '失败'; then
+            echo "::error::UI 仿真的结论是「失败」"
+            exit 1
+          fi
+          echo "UI 仿真：通过"

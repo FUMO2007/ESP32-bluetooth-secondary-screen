@@ -119,7 +119,9 @@ $Inc = @('-I', (Join-Path $Root 'tools\ui_preview'), '-I', (Join-Path $Root 'PC_
 $Py = $null
 $cands = @(
     $env:PCMON_PY,
-    'D:\PC_Monitor\PC端\venv\Scripts\python.exe',
+    # 部署目录的 venv（相对仓库根定位，别写死绝对路径 —— 换台机器 clone
+    # 下来就跑不通了）。历史原因见 pc_side/README.md 里"工作区/部署目录"那节。
+    (Join-Path $Root '..\PC端\venv\Scripts\python.exe'),
     (Join-Path $Root '.venv\Scripts\python.exe'),
     (Join-Path $Root 'venv\Scripts\python.exe')
 )
@@ -311,6 +313,61 @@ if (-not $CliPath) {
         Write-Host "   使用: $CliPath"
         Invoke-Native $CliPath @('compile', '--fqbn', $Fqbn, '--warnings', 'all',
                                  (Join-Path $Root 'PC_Monitor')) 'arduino-cli compile'
+    }
+}
+
+# ---------------------------------------------------------------- 9. 部署副本一致性
+# 为什么需要这一步：pc_side/ 是仓库内的源码，实际运行的是仓库旁边 PC端\ 里的部署副本
+# （主程序在部署时被改名成 pc_monitor_libre.py，见 deploy.ps1 的 $Map）。两边是**两份
+# 文件**，谁改了哪边全靠人记得 —— pc_side/README.md 自己就记着这个病以前犯过。
+# 这里把"靠人记得"变成"构建时必然发现"：不一致就报出来并给出 deploy 命令。
+#
+# 部署目录不在别人机器上是完全正常的（他们没有运行现场），所以缺失时**软跳过**：
+# 明确写"跳过"，不算失败，也绝不假装通过。
+$DeployDir = Join-Path (Split-Path $Root -Parent) 'PC端'
+$DeployPairs = @(
+    @{ Repo = 'pc_side\pc_monitor_v2.py'; Deployed = 'pc_monitor_libre.py' },
+    @{ Repo = 'pc_side\proto_v2.py';      Deployed = 'proto_v2.py' }
+)
+
+if (-not (Test-Path $DeployDir)) {
+    Write-Host ""
+    Write-Host "── 9) 部署副本一致性 " -ForegroundColor DarkGray -NoNewline
+    Write-Host "---------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "   [SKIP] 找不到部署目录 $DeployDir" -ForegroundColor Yellow
+    Write-Host "          这是正常的：它只是运行现场，不是仓库的一部分。" -ForegroundColor Gray
+    Write-Host "          有运行现场时放回该位置即可自动启用这一步。" -ForegroundColor Gray
+    [void]$Results.Add([pscustomobject]@{
+        Step = '9) 部署副本一致性'; Ok = $true; Ms = 0; Note = 'SKIP (无部署目录)' })
+} else {
+    Step '9) 部署副本一致性 (pc_side ↔ 部署目录)' {
+        $drift = @()
+        foreach ($pair in $DeployPairs) {
+            $repoPath = Join-Path $Root $pair.Repo
+            $depPath  = Join-Path $DeployDir $pair.Deployed
+            if (-not (Test-Path $depPath)) {
+                # 部署目录存在但这个文件没有：也算漂移（可能部署过一次就没再同步）
+                $drift += "$($pair.Deployed) 在部署目录里不存在"
+                continue
+            }
+            $hRepo = (Get-FileHash -LiteralPath $repoPath -Algorithm SHA256).Hash
+            $hDep  = (Get-FileHash -LiteralPath $depPath  -Algorithm SHA256).Hash
+            if ($hRepo -ne $hDep) {
+                $drift += "$($pair.Repo)  <->  $($pair.Deployed)  内容不同"
+            } else {
+                Write-Host "   [ok] $($pair.Deployed) 与仓库一致" -ForegroundColor DarkGray
+            }
+        }
+        if ($drift.Count -gt 0) {
+            # 只警告、不失败。理由：部署目录是**运行现场**，不是仓库的一部分 ——
+            # 它落后于仓库是完全正常的状态（比如刚改了 pc_side/ 还没 deploy），
+            # 也可能根本不在别人机器上。硬失败会让"改完代码先跑构建"无谓地红掉；
+            # 这一步的价值在于**把漂移说出来**，而不是拦住构建。
+            Write-Host "   [WARN] 部署副本与仓库有 $($drift.Count) 处不一致：" -ForegroundColor Yellow
+            foreach ($d in $drift) { Write-Host "          · $d" -ForegroundColor Yellow }
+            Write-Host "          跑 .\deploy.cmd 把仓库同步过去；若运行现场的改动才是新的，" -ForegroundColor Yellow
+            Write-Host "          请搬回 pc_side\ 再提交 —— 两边别各改各的。" -ForegroundColor Yellow
+        }
     }
 }
 

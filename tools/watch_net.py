@@ -10,7 +10,7 @@ r"""实时对照工具：把 PC 端每秒算出的网络速率，连同"固件�
 
    用法一：双击 tools\watch_net.bat（最省事，不需要管理员权限）
    用法二：在项目根目录 PC_Monitor_1 下执行
-     D:\\PC_Monitor\\PC端\\venv\\Scripts\\python.exe -B tools\\watch_net.py
+     python -B tools\watch_net.py
    按 Ctrl+C 停止。
 """
 import os
@@ -18,7 +18,10 @@ import sys
 import time
 
 os.environ['PCMON_NO_HIDE'] = '1'
-sys.path.insert(0, r'D:\PC_Monitor\PC端')
+
+# 从本仓库的 pc_side/ 导入（不写死开发机路径，见 probe_sensors.py 的说明）
+_REPO_PC_SIDE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'pc_side')
+sys.path.insert(0, _REPO_PC_SIDE if os.path.isdir(_REPO_PC_SIDE) else os.getcwd())
 
 # 控制台编码千奇百怪（GBK / UTF-8 / 437），中文表头编不出来时降级，别让脚本直接崩
 try:
@@ -27,7 +30,10 @@ except Exception:
     pass
 
 import psutil                                        # noqa: E402
-import pc_monitor_libre as m                          # noqa: E402
+try:
+    import pc_monitor_v2 as m                         # noqa: E402  # 仓库内
+except ImportError:
+    import pc_monitor_libre as m                      # noqa: E402  # 部署目录内
 import proto_v2 as pv                                 # noqa: E402
 
 IDX = {'DOWN': 24, 'UP': 25}

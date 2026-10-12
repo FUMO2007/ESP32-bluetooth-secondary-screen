@@ -5,10 +5,18 @@ import os
 import sys
 
 os.environ['PCMON_NO_HIDE'] = '1'          # 关键：别把测试终端一起藏掉
-PC_DIR = r'D:\PC_Monitor\PC端'
-sys.path.insert(0, PC_DIR)
 
-import pc_monitor_libre as m               # noqa: E402
+# 从**本仓库**的 pc_side/ 导入，不再写死开发机的部署目录 —— 别人 clone 下来
+# 也能直接跑这些探针。（部署目录是运行现场，仓库才是源码；两边靠 build.ps1 的
+# 一致性检查保证不漂移。）旧名 pc_monitor_libre.py 只在部署目录里存在（deploy.ps1
+# 部署时改的名），所以这里按仓库里的真名导入。
+_REPO_PC_SIDE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'pc_side')
+if os.path.isdir(_REPO_PC_SIDE):
+    sys.path.insert(0, _REPO_PC_SIDE)
+    import pc_monitor_v2 as m              # noqa: E402
+else:
+    sys.path.insert(0, os.getcwd())
+    import pc_monitor_libre as m           # noqa: E402  # 旧式部署目录内运行
 
 # 与 config.h 里的阈值一一对应（单位：°C / %）
 THR = {
