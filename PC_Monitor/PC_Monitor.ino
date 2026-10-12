@@ -38,5 +38,7 @@ void loop() {
   if (bleDataTake(snap, seq)) wavePush(snap);   // 只有真收到新包才推进波形
 
   drawMainUI();
-  delay(REFRESH_DELAY);
+
+  // 启动画面要 30fps 才像动画；连上之后数据页 5Hz 就够（也没必要一直推大块 SPI）
+  delay(uiFrameMs());
 }

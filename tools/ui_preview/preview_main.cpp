@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include "TFT_eSPI.h"
 #include "config.h"
+#include "screen_draw.h"      // uiBooting() / drawMainUI()：开机画面阶段判定要用
+#include "proto.h"            // PROTO_FIELD_COUNT：造"全无效握手包"用
 
 extern uint16_t SCREEN[320 * 240];
 extern TFT_eSPI tft;
@@ -107,6 +109,17 @@ static void publish(int f) {
   g_lastMs = millis();
 }
 
+// 全字段都是"读不到"（-1）的包 —— 就是 PC 端连上后立刻发的那个握手包
+// （pc_side/proto_v2.py 的 pack_test()）。它只用来确认协议通，没有任何读数。
+static void publishHandshake(void) {
+  HardwareData d;
+  float *p = (float *)&d;
+  for (size_t i = 0; i < PROTO_FIELD_COUNT; i++) p[i] = -1.0f;
+  g_data = d;
+  g_seq++;
+  g_lastMs = millis();
+}
+
 // ---------------- 页面识别（靠每页独有的像素特征，和渲染代码解耦）----------------
 //  趋势页：大图底色 0x0861
 //  IO 页：左卡片主指标条用青色 0x07FF（概览页的主指标条是绿/橙）
@@ -114,6 +127,7 @@ static void publish(int f) {
 //  概览页：以上都不是
 //  （44/166/142/62 是 screen_draw.cpp 里 MET_BAR_X/MET_BAR_W/MID_Y/MID_H 的值）
 static int detectPage() {
+  if (uiBooting()) return 0;         // 0 = 还在开机画面（不是任何一页）
   if (simCountColor(26, 42, 312, 150, 0x0861) > 200) return 3;
   // IO 页的左卡片主指标是青色的（数字 + 条），概览/散热的主指标是绿/橙
   if (simCountColor(12, 48, 150, 81, 0x07FF) > 80) return 4;
@@ -148,6 +162,133 @@ static int w4(const char *s) {
 int main() {
   tft._bind(SCREEN, 320, 240);
   setup();
+
+  // ==================== 0) 开机画面（连上 PC 之前）====================
+  //  上电后到"连上 PC 并收到第一包数据"之间，屏幕上应该是启动画面，而不是数据页
+  //  （后者在没数据时是满屏 "--" + NO SIGNAL，看着像坏了）。这一段按真实节奏
+  //  （BOOT_FRAME_MS=33ms）逐帧推，验证：
+  //    · 阶段：uiBooting() 为真，detectPage() 认不出任何一页（返回 0）
+  //    · 构图：Font4 大标题的白墨左右居中
+  //    · 动效：扫描条高亮逐帧在动，且始终在底槽范围内
+  //    · 状态：等 PC = 黄，已连接等数据 = 青；超时后出现提示行
+  //    · 频闪红线：启动动画的稳态帧"直接画到屏幕的文字次数"必须是 0
+  //    · 切页：连上并收到数据后进数据页，且数据页盖不到的缝隙里没有启动画面残留
+  //  版面数字（62/146/162/188/212）来自 screen_draw.cpp 的 BOOT_* 宏，改那边要同步改这里。
+  printf("\n=== 0) 开机画面（连上 PC 之前）===\n");
+  bleConnected = false;                       // 还没连上
+  int bootBad = 0;
+  const int bTitleY = 62, bTrackX = 60, bTrackY = 146, bTrackW = 200;
+  const int bStatusY = 162, bHintY = 188, bDevY = 212;
+
+  printf("  上电即在启动画面=%d（期望 1）  detectPage()=%d（期望 0：不是任何一页）\n",
+         (int)uiBooting(), detectPage());
+  if (!uiBooting() || detectPage() != 0) { bootBad++; printf("  !! 上电没有停在启动画面\n"); }
+
+  // ---- 大标题：白墨存在且左右居中（Font4 在仿真里是等宽占位块，但宽度表是真实的）----
+  int tL = simLeftmostNonBg(0, bTitleY, 320, bTitleY + 26, 0x0000);
+  int tR = simRightmostNonBg(0, bTitleY, 320, bTitleY + 26, 0x0000);
+  int tWhite = simCountColor(0, bTitleY, 320, bTitleY + 26, 0xFFFF);
+  printf("  大标题：白墨 %d 像素，落点 x %d..%d（居中偏差 %d，期望 <=3）\n",
+         tWhite, tL, tR, abs(tL - (319 - tR)));
+  if (tWhite < 200 || tL < 0 || tR < 0 || abs(tL - (319 - tR)) > 3) {
+    bootBad++; printf("  !! 大标题缺失或没有居中\n");
+  }
+
+  // ---- 10 帧动画：高亮必须动，而且不越出底槽 ----
+  int sweep[10];
+  int steadyText = -1;
+  for (int i = 0; i < 10; i++) {
+    simAdvanceMs(BOOT_FRAME_MS);
+    loop();
+    // 只扫底槽内部（去掉 1px 边框），最左边的非底槽色像素就是高亮的左边界
+    sweep[i] = simLeftmostNonBg(bTrackX + 1, bTrackY + 2, bTrackX + bTrackW - 1,
+                                bTrackY + 8, 0x0841);
+    if (i == 4) {
+      // 稳态帧：动画在动，但不该有任何文字"直接画到屏幕"（都要走离屏画布，
+      // 否则就是"先擦后画"的微闪来源 —— 和数据页的红线是同一条）
+      simResetCounters();
+      simAdvanceMs(BOOT_FRAME_MS);
+      loop();
+      steadyText = simTextOnScreen();
+    }
+  }
+  int swMin = sweep[0], swMax = sweep[0], swDiff = 0;
+  for (int i = 0; i < 10; i++) {
+    if (sweep[i] < swMin) swMin = sweep[i];
+    if (sweep[i] > swMax) swMax = sweep[i];
+    if (i && sweep[i] != sweep[0]) swDiff++;
+  }
+  printf("  高亮左边界（10 帧）: %d %d %d %d %d %d %d %d %d %d\n",
+         sweep[0], sweep[1], sweep[2], sweep[3], sweep[4], sweep[5], sweep[6], sweep[7],
+         sweep[8], sweep[9]);
+  printf("  在动（不同位置数 %d，期望 >=6）  范围 %d..%d（底槽内 %d..%d）\n",
+         swDiff, swMin, swMax, bTrackX + 1, bTrackX + 1 + (bTrackW - 44 - 1));
+  if (swDiff < 6 || swMin < bTrackX + 1 || swMax > bTrackX + bTrackW - 44) {
+    bootBad++; printf("  !! 扫描条没动或跑出底槽\n");
+  }
+  printf("  扫描条青色像素=%d（期望 %d：44x4）\n",
+         simCountColor(bTrackX, bTrackY, bTrackX + bTrackW, bTrackY + 10, 0x07FF), 44 * 4);
+  printf("  稳态帧直接画到屏幕的文字次数=%d（期望 0）\n", steadyText);
+  if (steadyText != 0) { bootBad++; printf("  !! 启动动画有文字直接画到屏幕（会微闪）\n"); }
+
+  // ---- 状态行：等 PC 时是黄的（C_WARN）----
+  int warnPix = simCountColor(20, bStatusY, 300, bStatusY + 16, 0xFFE0);
+  printf("  状态行黄色像素=%d（期望 >0：还在等 PC）\n", warnPix);
+  if (warnPix <= 0) { bootBad++; printf("  !! 等待状态没有用黄色标出\n"); }
+  simSaveBmp("boot_1_waiting.bmp");
+
+  // ---- 超过 BOOT_HINT_MS 还没连上：应出现提示行，且仍在启动画面 ----
+  simAdvanceMs(BOOT_HINT_MS + 1000);
+  loop();
+  int hintPix = simCountColor(20, bHintY, 300, bHintY + 10, 0xD69A);
+  printf("  等待 %lus 后：提示行暗灰像素=%d（期望 >0：START THE PC APP ON THIS PC）\n",
+         (unsigned long)(BOOT_HINT_MS / 1000), hintPix);
+  printf("  仍在启动画面=%d（期望 1：连不上就一直等，不切 -- 页面）\n", (int)uiBooting());
+  if (hintPix <= 0 || !uiBooting()) { bootBad++; printf("  !! 超时提示没有出现或提前切页\n"); }
+  int devPix = simCountColor(0, bDevY, 320, bDevY + 8, 0xD69A);
+  printf("  底部 BLE 设备名暗灰像素=%d（期望 >0：%s）\n", devPix, BLE_DEVICE_NAME);
+  if (devPix <= 0) { bootBad++; printf("  !! 没印出 BLE 设备名\n"); }
+  simSaveBmp("boot_2_hint.bmp");
+
+  // ---- 连上了但还没数据：状态转青（C_CYAN），仍然停在启动画面 ----
+  bleConnected = true;
+  simAdvanceMs(BOOT_FRAME_MS);
+  loop();
+  int cyanPix = simCountColor(20, bStatusY, 300, bStatusY + 16, 0x07FF);
+  printf("  连上但无数据：状态行青色像素=%d（期望 >0）  仍在启动画面=%d（期望 1）\n",
+         cyanPix, (int)uiBooting());
+  if (cyanPix <= 0 || !uiBooting()) { bootBad++; printf("  !! 已连接状态没有转青或提前切页\n"); }
+  simSaveBmp("boot_3_linked.bmp");
+
+  // ---- 握手包（全字段无效）不能触发切页 ----
+  //  PC 端连上后先发这个包确认协议通；如果按"收到包就切"处理，屏幕会先切到数据页
+  //  显示一片 "--"，一秒后才出数 —— 正是启动画面要避免的画面。
+  publishHandshake();
+  simAdvanceMs(BOOT_FRAME_MS);
+  loop();
+  printf("  收到全无效握手包后：仍在启动画面=%d（期望 1）  detectPage=%d（期望 0）\n",
+         (int)uiBooting(), detectPage());
+  if (!uiBooting()) { bootBad++; printf("  !! 握手包就把屏幕切到了数据页（会闪一片 --）\n"); }
+
+  // ---- 收到第一包数据：切到数据页面（概览页），并检查接缝里没有启动画面残留 ----
+  publish(0);
+  int bootFrames = 0;
+  while (uiBooting() && bootFrames < 50) { simAdvanceMs(BOOT_FRAME_MS); loop(); bootFrames++; }
+  printf("  收到数据后 %d 帧内切到数据页：uiBooting=%d（期望 0）  detectPage=%d（期望 1）\n",
+         bootFrames, (int)uiBooting(), detectPage());
+  if (uiBooting() || detectPage() != 1) { bootBad++; printf("  !! 收到数据后没有切到数据页面\n"); }
+  // 数据页只覆盖「标题栏/两张卡片/中块/底栏」，卡片之间与四周的 4px 缝隙要靠
+  // bootClearResidue() 补清；不补的话启动画面的白字会留在缝里。
+  int gapPix = simCountColor(158, 26, 162, 138, 0x0000);
+  int leftPix = simCountColor(0, 26, 4, 204, 0x0000);
+  printf("  接缝残留检查：两卡之间 %d/%d 像素是背景，左边距 %d/%d（都期望相等）\n",
+         gapPix, 4 * 112, leftPix, 4 * 178);
+  if (gapPix != 4 * 112 || leftPix != 4 * 178) {
+    bootBad++; printf("  !! 缝隙里有启动画面残留（bootClearResidue 没盖到）\n");
+  }
+  simSaveBmp("boot_4_data_after.bmp");
+
+  printf("  %s\n", bootBad ? "  !! 开机画面有失败项" : "  开机画面全部通过");
 
 #if FORCE_PAGE
   // 调试模式（config.h 的 FORCE_PAGE 非 0）：只验证"画面恒定停在这一页"

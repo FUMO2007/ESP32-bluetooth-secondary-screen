@@ -1297,7 +1297,32 @@ void drawStaticUI() {
   drawStaticOverview();
 }
 
+// ===================== 开机画面：状态与前置声明 =====================
+//  实现在文件后半的「开机动画」一节。主循环的入口 drawMainUI() 定义在它前面，
+//  而 C++ 里"用在前、定义在后"必须先有声明，所以阶段枚举、共享状态和要用到的
+//  几个函数都在这里先声明一次。
+enum UiPhase : uint8_t { UI_BOOT = 0, UI_DATA = 1 };
+
+static uint8_t  uiPhase = UI_BOOT;
+static uint32_t bootStartMs = 0;
+static bool     bootLastPill = false;
+static char     bootLastHint[32] = {0};
+static bool     bootHintDrawn = false;
+
+static void bootDrawStatic();
+static void bootClearResidue();
+static bool bootUpdate();
+
 void drawMainUI() {
+  // 还没连上 PC 就停在启动画面：这时候数据页面没有任何有意义的内容可画
+  // （满屏 "--" + NO SIGNAL），不如用来交代"在等什么"。
+  if (uiPhase == UI_BOOT) {
+    if (!bootUpdate()) return;
+    uiPhase = UI_DATA;
+    bootClearResidue();
+    firstRun = true;              // 让数据页整体重画一次（标题栏/卡片/底栏）
+  }
+
   FrameCtx c;
   c.hasData = bleDataSnapshot(c.d);
   c.now = millis();
@@ -1448,6 +1473,213 @@ void drawMainUI() {
   lastData = c.d;
 }
 
+// ===================== 开机动画 =====================
+//  为什么要有它：上电到 PC 端连上之间要等几秒（PC 端程序没启动时会一直等），
+//  这段时间如果直接显示数据页面，就是满屏 "--" 加 NO SIGNAL —— 看着像坏了。
+//  启动画面把这段时间用来交代"在等什么"：BLE 在广播 / 等 PC 连接 / 已连接等数据，
+//  另外把 BLE 设备名印出来，方便在 PC 端程序里对上号。
+//
+//  动效只有"一条来回扫的指示条 + 状态文字 + 三点省略号"，全部走离屏画布
+//  （regionBegin/regionEnd），不留"先擦后画"的空窗 —— 与数据页的刷新规矩一致。
+//  扫描条一个来回 2.4 秒，帧率由 config.h 的 BOOT_FRAME_MS 决定（默认 33ms≈30fps）。
+//
+//  版面（320x240，全部用 TL_DATUM + 手工居中：仿真里只实现了 TL/TR 基准）
+//    y 0..21    标题栏（复用 drawTitleBar："PC MONITOR" + BOOTING + 链路胶囊）
+//    y 62..88   Font4 大标题 "PC MONITOR"
+//    y 98..106  小字 "SYSTEM TELEMETRY"
+//    y 114..120 三色强调条（CPU 绿 / 青 / GPU 橙）
+//    y 146..156 扫描条（底槽 + 44px 高亮来回扫）
+//    y 162..178 状态文字（字体 1 放大 2 倍）
+//    y 188..196 超过 BOOT_HINT_MS 还没连上时追加的一行提示
+//    y 212..220 BLE 设备名
+#define BOOT_TITLE_Y   62
+#define BOOT_CAP_Y     98
+#define BOOT_ACC_Y     114
+#define BOOT_ACC_W     120
+#define BOOT_TRACK_X   60
+#define BOOT_TRACK_Y   146
+#define BOOT_TRACK_W   200
+#define BOOT_TRACK_H   10
+#define BOOT_SWEEP_W   44
+#define BOOT_STATUS_Y  162
+#define BOOT_HINT_Y    188
+#define BOOT_DEV_Y     212
+#define BOOT_SWEEP_MS  2400      // 扫描条一个来回
+
+uint16_t uiFrameMs() {
+  // 启动画面要 30fps 才像动画；数据页 5Hz 就够（而且没必要一直推大块 SPI）
+  return (uiPhase == UI_BOOT) ? BOOT_FRAME_MS : (uint16_t)REFRESH_DELAY;
+}
+
+bool uiBooting() { return uiPhase == UI_BOOT; }
+
+// 居中的小工具（TL_DATUM + 手工算宽度；字体 1 是 6px/字符，放大 n 倍就是 6n）
+static int bootTextX(const char *s, uint8_t font, uint8_t size) {
+  int w = (font == 1) ? (int)strlen(s) * 6 * (int)size
+                      : (int)tft.textWidth(s, font);
+  return (SCR_W - w) / 2;
+}
+
+static void bootDrawStatic() {
+  drawTitleBar("BOOTING", -1);      // -1：四个页码点全灭（还没进任何一页）
+  drawBlePill();
+  bootLastPill = bleConnected;
+
+  tft.setTextFont(4);
+  tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_VALUE, C_BG);
+  tft.drawString("PC MONITOR", bootTextX("PC MONITOR", 4, 1), BOOT_TITLE_Y);
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(C_LABEL_DIM, C_BG);
+  tft.drawString("SYSTEM TELEMETRY", bootTextX("SYSTEM TELEMETRY", 1, 1), BOOT_CAP_Y);
+
+  // 三色强调条：左右各 36px 品牌色，中间青色，段间留 6px
+  {
+    int x = (SCR_W - BOOT_ACC_W) / 2;
+    const int seg = 36, gap = 6;
+    tft.fillRect(x, BOOT_ACC_Y, seg, 6, C_CPU);
+    tft.fillRect(x + seg + gap, BOOT_ACC_Y, seg, 6, C_CYAN);
+    tft.fillRect(x + 2 * (seg + gap), BOOT_ACC_Y, seg, 6, C_GPU);
+  }
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(C_LABEL_DIM, C_BG);
+  tft.drawString(BLE_DEVICE_NAME, bootTextX(BLE_DEVICE_NAME, 1, 1), BOOT_DEV_Y);
+}
+
+// 状态文字：0 刚上电 / 1 等 PC 连接 / 2 已连接等数据 / 3 收到数据（马上切页）
+static const char *bootStatusText(uint8_t st, uint8_t dots) {
+  static char buf[32];
+  switch (st) {
+    case 0:  return "BLE STARTING";
+    case 1:  snprintf(buf, sizeof(buf), "WAITING FOR PC%.*s", (int)dots, "..."); return buf;
+    case 2:  return "LINKED - WAITING DATA";
+    default: return "RECEIVING DATA";
+  }
+}
+
+static uint16_t bootStatusColor(uint8_t st) {
+  switch (st) {
+    case 0: case 1: return C_WARN;    // 还在等：黄
+    case 2:         return C_CYAN;    // 连上了但没数据：青
+    default:        return C_OK;      // 数据到了：绿
+  }
+}
+
+// 有没有"真数据"？**握手包不算**。
+//  PC 端连上后会先发一个全 0xFFFF 的握手包（proto_v2.pack_test()，用来确认协议通）。
+//  如果只看"收到过包"就切页，屏幕会先切到数据页显示一片 "--"，一秒后才出数 ——
+//  那正是启动画面想避免的画面。所以这里要求至少有一个字段不是哨兵(-1)。
+//  （HardwareData 全是 float，按 float 扫一遍即可；ble_service.cpp 的 markAllInvalid
+//    用的是同一个前提，那边有 static_assert 兜着。）
+static bool bootHasRealData() {
+  HardwareData d;
+  if (!bleDataSnapshot(d)) return false;
+  const float *p = reinterpret_cast<const float *>(&d);
+  for (size_t i = 0; i < PROTO_FIELD_COUNT; i++) {
+    if (p[i] >= 0.0f) return true;
+  }
+  return false;
+}
+
+static void bootDrawDynamic(uint32_t now) {
+  uint8_t st;
+  if (bleConnected && bootHasRealData())      st = 3;
+  else if (bleConnected)                      st = 2;
+  else if ((uint32_t)(now - bootStartMs) < 700) st = 0;
+  else                                        st = 1;
+
+  // ---- 扫描条：底槽 + 44px 高亮来回扫 ----
+  {
+    Canvas c = regionBegin(BOOT_TRACK_X, BOOT_TRACK_Y, BOOT_TRACK_W, BOOT_TRACK_H, C_BG);
+    TFT_eSPI &g = *c.g;
+    g.fillRect(BOOT_TRACK_X + c.dx, BOOT_TRACK_Y + c.dy, BOOT_TRACK_W, BOOT_TRACK_H, C_BAR_BG);
+    g.drawRect(BOOT_TRACK_X + c.dx, BOOT_TRACK_Y + c.dy, BOOT_TRACK_W, BOOT_TRACK_H, C_CARD_ED);
+
+    int span = BOOT_TRACK_W - BOOT_SWEEP_W;
+    uint32_t ph = ((uint32_t)(now - bootStartMs) % BOOT_SWEEP_MS) * span / (BOOT_SWEEP_MS / 2);
+    int pos = (ph > (uint32_t)span) ? (int)(2 * (uint32_t)span - ph) : (int)ph;
+    g.fillRect(BOOT_TRACK_X + pos + c.dx, BOOT_TRACK_Y + 3 + c.dy,
+               BOOT_SWEEP_W, BOOT_TRACK_H - 6, C_CYAN);
+    regionEnd(c, BOOT_TRACK_X, BOOT_TRACK_Y, BOOT_TRACK_W, BOOT_TRACK_H);
+  }
+
+  // ---- 状态文字（每帧重推一次：走画布，所以不会"先擦后画"闪一下）----
+  {
+    uint8_t dots = (uint8_t)(((uint32_t)(now - bootStartMs) / 400) % 4);
+    const char *txt = bootStatusText(st, dots);
+    int w = (int)strlen(txt) * 6 * 2;
+    int x = (SCR_W - w) / 2;
+    Canvas c = regionBegin(x, BOOT_STATUS_Y, w, 16, C_BG);
+    TFT_eSPI &g = *c.g;
+    g.setTextFont(1);
+    g.setTextSize(2);
+    g.setTextDatum(TL_DATUM);
+    g.setTextColor(bootStatusColor(st), C_BG);
+    g.drawString(txt, x + c.dx, BOOT_STATUS_Y + c.dy);
+    regionEnd(c, x, BOOT_STATUS_Y, w, 16);
+  }
+
+  // ---- 迟迟连不上时追加一行提示（只在文字变化时重画）----
+  {
+    const char *hint = (st <= 1 && (uint32_t)(now - bootStartMs) > BOOT_HINT_MS)
+                       ? "START THE PC APP ON THIS PC" : "";
+    if (strcmp(hint, bootLastHint) != 0) {
+      strncpy(bootLastHint, hint, sizeof(bootLastHint) - 1);
+      bootLastHint[sizeof(bootLastHint) - 1] = 0;
+      int w = 29 * 6;                       // 按最长的那句留宽度，避免长短句来回擦不干净
+      int x = (SCR_W - w) / 2;
+      Canvas c = regionBegin(x, BOOT_HINT_Y, w, 10, C_BG);
+      TFT_eSPI &g = *c.g;
+      g.setTextFont(1);
+      g.setTextSize(1);
+      g.setTextDatum(TL_DATUM);
+      g.setTextColor(C_LABEL_DIM, C_BG);
+      if (hint[0]) g.drawString(hint, x + c.dx, BOOT_HINT_Y + c.dy);
+      regionEnd(c, x, BOOT_HINT_Y, w, 10);
+      bootHintDrawn = true;
+    }
+  }
+}
+
+// 启动画面 → 数据页面：补清数据页盖不到的缝隙。
+//  启动画面是整屏构图的，而数据页只覆盖「标题栏 / 两张卡片 / 中块 / 底栏」四块，
+//  卡片之间与四周那几条 4px 缝隙不会被覆盖 —— 不补清就会留下启动画面的残留。
+//  （这是本项目切页时的同一条规矩：新页面盖不到的区域要自己补清。）
+static void bootClearResidue() {
+  const uint16_t bg = C_BG;
+  tft.fillRect(0, TITLE_H, SCR_W, CARD_Y - TITLE_H, bg);                    // y 22..25
+  tft.fillRect(0, CARD_Y + CARD_H, SCR_W, MID_Y - (CARD_Y + CARD_H), bg);   // y 138..141
+  tft.fillRect(0, MID_Y + MID_H, SCR_W, BOT_Y - (MID_Y + MID_H), bg);       // y 204..207
+  tft.fillRect(0, CARD_Y, PAD, MID_Y + MID_H - CARD_Y, bg);                 // 左 4px
+  tft.fillRect(SCR_W - PAD, CARD_Y, PAD, MID_Y + MID_H - CARD_Y, bg);       // 右 4px
+  tft.fillRect(CPU_X + CARD_W, CARD_Y, GAP, CARD_H, bg);                    // 两卡之间的 4px
+}
+
+// 返回 true = 这一帧起切到数据页面
+static bool bootUpdate() {
+  uint32_t now = millis();
+
+  // 链路胶囊随连接状态翻转（它画在标题栏上，得整条重画才没有接缝）
+  if (bleConnected != bootLastPill) {
+    bootLastPill = bleConnected;
+    drawTitleBar("BOOTING", -1);
+    drawBlePill();
+  }
+
+  bootDrawDynamic(now);
+
+  // 升级条件：**连上了 并且 收到了真数据**（不是那个全无效的握手包），
+  // 而且启动画面至少显示了 BOOT_MIN_MS。只看 bleConnected 不够：连上到第一包
+  // 真数据之间屏幕还是没东西可显示；最短时长是为了"PC 端秒连"时动画不会只闪半帧。
+  return bleConnected && bootHasRealData()
+         && (uint32_t)(now - bootStartMs) >= BOOT_MIN_MS;
+}
+
 // ===================== 初始化 =====================
 void screenInit() {
   tft.init();
@@ -1463,6 +1695,11 @@ void screenInit() {
   digitalWrite(TFT_BL, HIGH);
 
   memset(&lastData, 0, sizeof(HardwareData));
+  uiPhase = UI_BOOT;
+  bootStartMs = millis();
+  bootLastPill = false;
+  bootLastHint[0] = 0;
+  bootHintDrawn = false;
   firstRun = true;
   lastStale = false;
   lastBle = false;
@@ -1498,5 +1735,5 @@ void screenInit() {
                   (int)PLOT_W, (int)TREND_PLOT_H, (unsigned)ESP.getFreeHeap());
   }
 
-  drawStaticUI();
+  bootDrawStatic();     // 开机先停在启动画面：连上 PC 并收到数据后才画数据页
 }

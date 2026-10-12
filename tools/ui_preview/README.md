@@ -58,6 +58,8 @@ tools\ui_preview\preview_forced.exe      # 只跑"帧数内不偏离该页"这�
 
 产物：
 
+- `boot_1_waiting.bmp` / `boot_2_hint.bmp` / `boot_3_linked.bmp` / `boot_4_data_after.bmp`：
+  开机画面（等 PC / 超时提示 / 已连接等数据）与刚切进数据页的第一帧
 - `page1_overview.bmp` / `page2_thermal.bmp` / `page3_trend.bmp` / `page4_io.bmp`：四个页面各一张（BMP，可直接看）
 - `preview_live.bmp` / `preview_stale.bmp`：最后停在概览页的正常帧 / 断线无数据帧
 - `report.txt`：字符化的画面 + 全部断言结果
@@ -71,7 +73,7 @@ tools\ui_preview\preview_forced.exe      # 只跑"帧数内不偏离该页"这�
 | `preview_impl.cpp` | 桩实现：帧缓冲、图元、文本、sprite、BMP 导出、字符化/墨迹图/断言工具 |
 | `preview_main.cpp` | 假数据源 + 主流程 + 断言清单 |
 | `proto_test.cpp` | **协议跨语言测试**：解 `pc_side/test_proto.py` 生成的金标向量 |
-| `page*.png` / `preview_*.png` | 已渲染好的预览图（4 个页面 + 断线帧） |
+| `page*.png` / `preview_*.png` / `boot_*.png` | 已渲染好的预览图（4 个页面、断线帧、开机画面三个阶段） |
 
 编译仿真（三个可执行文件）：
 
@@ -85,6 +87,13 @@ g++ -std=gnu++11 -I tools\ui_preview -I PC_Monitor tools\ui_preview\proto_test.c
 
 ## 断言覆盖了什么
 
+- **开机画面**（第 0 段，先于所有页面断言）：上电后处于启动画面而不是数据页
+  （`uiBooting()` 为真、`detectPage()` 返回 0）；Font4 大标题的白墨左右居中（偏差 ≤3px）；
+  扫描条的高亮逐帧在动（10 帧里至少 6 个不同位置）且始终在底槽内；
+  等 PC 时状态行是黄的、连上后转青；超过 `BOOT_HINT_MS` 出现 "START THE PC APP ON THIS PC"；
+  稳态帧"直接画到屏幕的文字次数=0"（动画也走离屏画布）；
+  收到第一包数据后 1 帧内切到概览页，且**数据页盖不到的 4px 缝隙里没有启动画面残留**
+  （两卡之间 448/448、左边距 712/712 像素都是背景 —— 少了 `bootClearResidue()` 就会红）。
 - **翻页**：四页都出现、页码圆点指向当前页；温度告警自动跳到散热页、负载告警跳到概览页；
   **锁页只持续 `ALARM_PIN_MS`（12s）**，超时后即使告警没解除也恢复轮播（否则长期超阈值的
   指标会把画面永久钉死）；转回来时告警视觉（红色数值 + 边框呼吸）仍在；告警解除后颜色
@@ -152,6 +161,10 @@ g++ -std=gnu++11 -I tools\ui_preview -I PC_Monitor tools\ui_preview\proto_test.c
   （踩过坑：页脚 `SAMPLE` → 改 `RATE`；系统卡片 `UPTIME` 用了 42px 专用列宽）。
 - 新增布局常量后补一条 `static_assert`，越界会直接编译失败
   （踩过坑：系统卡片内容溢出 2px、波形区多出 4px 盖住卡片右边框）。
+- **开机画面的版面数字在 `preview_main.cpp` 第 0 段里是手抄的**（`bTitleY=62` /
+  `bTrackY=146` / `bStatusY=162` / `bHintY=188` / `bDevY=212`，来自 `screen_draw.cpp`
+  的 `BOOT_*` 宏）。改那边要同步改这里 —— 和 `detectPage()` 里那几个手抄的
+  `MET_BAR_X/MID_Y` 是同一个约定。
 
 ## 别用 PowerShell 碰源文件
 
