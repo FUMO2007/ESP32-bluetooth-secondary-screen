@@ -1,0 +1,56 @@
+# ============================================================
+#  PC Monitor 可选配置文件
+#  放在 pc_monitor_libre.exe 旁边（同目录），改完重启程序即生效，
+#  不需要重新打包。删掉本文件就全用内置默认值。
+#  格式：一行一条 key=value；以 # 开头是注释；空行忽略。
+# ============================================================
+
+# ---- 网络延迟探测（屏幕第 4 页的 PING / LOSS）----
+# 默认 223.5.5.5（阿里 DNS）：国内 TCP 往返实测约 39ms。
+# 用 1.1.1.1（Cloudflare）在国内实测 233ms，而 PING 超过 100ms 屏幕会变黄，
+# 会一直黄着像坏了，所以默认换成国内目标。
+PING_HOST = 223.5.5.5
+PING_PORT = 53
+PING_INTERVAL = 5.0
+PING_WINDOW = 10
+
+# ---- 采集间隔（秒）----
+# 调小 = 数据更实时，但趋势图窗口更短（窗口 = 140 个采样点 × 本值）。
+#   1.0 -> 约 2 分 20 秒
+#   0.5 -> 约 1 分 10 秒
+COLLECT_INTERVAL = 1.0
+
+# ---- 帧率来源（屏幕上的 FPS / TIME）----
+#   auto       先试 PresentMon，再试 RTSS（装了哪个就用哪个，都不用装）
+#   presentmon 只用 PresentMon
+#   rtss       只用 RTSS
+#   none       不测帧率，永远显示 --
+#
+# **拿不到数据时一律显示 --，程序不会估算一个数字出来。**
+FPS_SOURCE = auto
+
+# PresentMon 可执行文件的路径。留空 = 自动查找，顺序是：
+#   程序同目录 -> 打包时随包分发的那份 -> %LOCALAPPDATA%\PCMonitor -> PATH
+# 只有你把 PresentMon 放在别处时才需要填。
+# PRESENTMON_PATH = D:\Tools\PresentMon-2.6.0-x64.exe
+
+# 是否尝试读 RTSS 共享内存（1/0）。只有装并运行了 RTSS 或 MSI Afterburner
+# 才有数据：winget install Guru3D.RTSS
+RTSS_ENABLE = 1
+
+# ---- 其它可调项 ----
+# 按你的需要打开下面任意一行（默认值写在注释里）。
+
+# 采集器多久连不上就自动退出（分钟）。默认 10。
+# 程序会在日志里写明退出原因，不会像以前那样悄无声息地消失。
+# AUTO_EXIT_MINUTES = 10
+
+# 断线后最多重连几次。默认 3 —— 注意重连次数用尽程序会退出，
+# 如果你经常刷固件（ESP32 每次重启都会断开），可以调大。
+# MAX_RECONNECT_ATTEMPTS = 3
+
+# 走旧 CSV 文本协议（只 14 个字段），用于排查。默认 binary。
+# PROTOCOL = csv
+
+# BLE 广播名。有两台显示器时用它选一台。默认 PC-MONITOR-ST7789。
+# DEVICE_NAME = PC-MONITOR-ST7789

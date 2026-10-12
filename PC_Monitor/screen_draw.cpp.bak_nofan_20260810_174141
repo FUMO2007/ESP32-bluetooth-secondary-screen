@@ -1,0 +1,300 @@
+#include "screen_draw.h"
+
+TFT_eSPI tft = TFT_eSPI();
+
+static HardwareData lastData;
+static bool firstRun = true;
+static int lastCpuWave[WAVE_POINTS] = {0};
+static int lastGpuWave[WAVE_POINTS] = {0};
+
+// ===================== 主题色 =====================
+#define C_BG       0x0000   // 背景（黑）
+#define C_TITLE1   0x18E3   // 标题栏渐变（上）
+#define C_TITLE2   0x0821   // 标题栏渐变（下）
+#define C_CARD     0x0C63   // 卡片背景（深蓝灰）
+#define C_CARD_ED  0x2965   // 卡片内部线条
+#define C_LABEL    0xBDF7   // 标签（浅灰）
+#define C_VALUE    0xFFFF   // 数值（白）
+#define C_CPU      0x7FE0   // CPU 主题（亮绿）
+#define C_CPU_DIM  0x0460   // CPU 暗（边框/波形填充）
+#define C_GPU      0xF81F   // GPU 主题（亮粉红）
+#define C_GPU_DIM  0x9000   // GPU 暗
+#define C_OK       0x07E0
+#define C_WARN     0xFFE0
+#define C_ALERT    0xF800
+#define C_ORANGE   0xFD20
+#define C_BAR_BG   0x0841   // 进度条底
+
+// ===================== 布局 =====================
+#define TITLE_H    24
+#define CARD_Y     30
+#define CARD_H     112
+#define CARD_W     152
+#define CPU_X      4
+#define GPU_X      164
+#define WAVE_Y     148
+#define WAVE_H     50
+#define BOT_Y1     202
+#define BOT_Y2     226
+
+String fmtValue(float v, int dec, const char* unit) {
+  if (v <= 0) return "--";
+  return String(v, dec) + unit;
+}
+
+// 显存显示为"已用/总量"（0 是有效值；负数表示读不到）
+String fmtVram(float used, float total) {
+  if (used < 0 || total < 0) return "--";
+  return String(used, 1) + "/" + String(total, 1) + " GB";
+}
+
+// 进度条颜色：按百分比 绿 -> 黄 -> 红
+uint16_t barColor(float pct) {
+  if (pct > 80) return C_ALERT;
+  if (pct > 60) return C_WARN;
+  return C_OK;
+}
+
+// 绘制进度条（x,y 左上角，w 宽，h 高，pct 百分比）
+void drawBar(int x, int y, int w, int h, float pct) {
+  int len = (int)(constrain(pct, 0, 100) * w / 100.0f);
+  tft.fillRect(x, y, w, h, C_BAR_BG);
+  if (len > 0) tft.fillRect(x, y, len, h, barColor(pct));
+  tft.drawRect(x, y, w, h, C_CARD_ED);
+}
+
+// 在卡片内右对齐绘制数值（xRight 为右边界，y 为文字顶部）
+void drawValue(int xRight, int y, const String &s, uint16_t color) {
+  tft.setTextColor(color);
+  tft.setTextSize(2);
+  tft.drawString(s, xRight - tft.textWidth(s), y);
+}
+
+void screenInit() {
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(C_BG);
+  tft.setTextColor(C_VALUE, C_BG);
+  tft.setTextDatum(TL_DATUM);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+
+  memset(&lastData, 0, sizeof(HardwareData));
+  memset(lastCpuWave, -1, sizeof(lastCpuWave));
+  memset(lastGpuWave, -1, sizeof(lastGpuWave));
+
+  drawStaticUI();
+}
+
+void drawStaticUI() {
+  tft.fillScreen(C_BG);
+
+  // ===== 标题栏（垂直渐变）=====
+  tft.fillRectVGradient(0, 0, 320, TITLE_H, C_TITLE1, C_TITLE2);
+  tft.setTextSize(2);
+  tft.setTextColor(C_VALUE);
+  tft.drawString("PC MONITOR", 10, 4);
+  tft.setTextSize(1);
+  tft.setTextColor(0x7BCF);
+  tft.drawString("SYSTEM MONITOR", 150, 16);
+  tft.drawLine(0, TITLE_H, 320, TITLE_H, 0x7BEF);
+  tft.drawLine(0, TITLE_H + 1, 320, TITLE_H + 1, 0x1CAF);
+
+  // ===== CPU 卡片 =====
+  tft.fillRoundRect(CPU_X, CARD_Y, CARD_W, CARD_H, 6, C_CARD);
+  tft.drawRoundRect(CPU_X, CARD_Y, CARD_W, CARD_H, 6, C_CPU_DIM);
+  tft.setTextColor(C_CPU);
+  tft.setTextSize(2);
+  tft.drawString("CPU", CPU_X + 8, CARD_Y + 4);
+  tft.setTextSize(1);
+  tft.setTextColor(0x5AEB);
+  tft.drawString("PROCESSOR", CPU_X + 52, CARD_Y + 10);
+  tft.drawLine(CPU_X + 4, CARD_Y + 22, CPU_X + CARD_W - 4, CARD_Y + 22, C_CARD_ED);
+  tft.setTextColor(C_LABEL);
+  tft.setTextSize(1);
+  tft.drawString("LOAD", CPU_X + 8, CARD_Y + 28);
+  tft.drawString("TEMP", CPU_X + 8, CARD_Y + 62);
+  tft.drawString("PWR",  CPU_X + 8, CARD_Y + 78);
+  tft.drawString("FAN",  CPU_X + 8, CARD_Y + 94);
+
+  // ===== GPU 卡片 =====
+  tft.fillRoundRect(GPU_X, CARD_Y, CARD_W, CARD_H, 6, C_CARD);
+  tft.drawRoundRect(GPU_X, CARD_Y, CARD_W, CARD_H, 6, C_GPU_DIM);
+  tft.setTextColor(C_GPU);
+  tft.setTextSize(2);
+  tft.drawString("GPU", GPU_X + 8, CARD_Y + 4);
+  tft.setTextSize(1);
+  tft.setTextColor(0x5AEB);
+  tft.drawString("GRAPHICS", GPU_X + 52, CARD_Y + 10);
+  tft.drawLine(GPU_X + 4, CARD_Y + 22, GPU_X + CARD_W - 4, CARD_Y + 22, C_CARD_ED);
+  tft.setTextColor(C_LABEL);
+  tft.setTextSize(1);
+  tft.drawString("LOAD", GPU_X + 8, CARD_Y + 28);
+  tft.drawString("TEMP", GPU_X + 8, CARD_Y + 62);
+  tft.drawString("VRAM", GPU_X + 8, CARD_Y + 78);
+  tft.drawString("PWR",  GPU_X + 8, CARD_Y + 94);
+
+  // ===== 波形框 =====
+  tft.fillRoundRect(CPU_X, WAVE_Y, CARD_W, WAVE_H, 6, C_CARD);
+  tft.drawRoundRect(CPU_X, WAVE_Y, CARD_W, WAVE_H, 6, C_CPU_DIM);
+  tft.fillRoundRect(GPU_X, WAVE_Y, CARD_W, WAVE_H, 6, C_CARD);
+  tft.drawRoundRect(GPU_X, WAVE_Y, CARD_W, WAVE_H, 6, C_GPU_DIM);
+
+  // ===== 底部标签 =====
+  tft.setTextSize(1);
+  tft.setTextColor(C_LABEL);
+  tft.drawString("RAM",  CPU_X + 8, BOT_Y1);
+  tft.drawString("DISK", CPU_X + 8, BOT_Y2);
+  tft.drawString("FPS",  GPU_X + 12, BOT_Y2);
+}
+
+void drawWaveGraph(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                   int buf[], int lastBuf[], uint16_t color, uint16_t fillColor) {
+  int drawX = x + 3;
+  int drawY = y + 3;
+  int drawW = w - 6;
+  int drawH = h - 6;
+
+  // 背景
+  tft.fillRect(drawX, drawY, drawW, drawH, 0x0821);
+
+  // 水平参考线（虚线）
+  uint16_t gridColor = 0x2945;
+  for (int i = 1; i < 4; i++) {
+    int gy = drawY + drawH - (i * drawH / 4);
+    for (int px = drawX; px < drawX + drawW; px += 4) {
+      tft.drawPixel(px, gy, gridColor);
+      tft.drawPixel(px + 1, gy, gridColor);
+    }
+  }
+
+  int points = WAVE_POINTS;
+  if (points > drawW) points = drawW;
+  int validPoints = waveIdx;
+  if (validPoints > points) validPoints = points;
+  if (validPoints < 2) validPoints = 2;
+
+  // 面积填充（由主题色暗调，向上渐变亮度）
+  for (int i = 1; i < validPoints; i++) {
+    int vp = constrain(buf[i-1], 0, 100);
+    int vc = constrain(buf[i], 0, 100);
+    if (vp == 0 && vc == 0) continue;
+    int yp = drawY + drawH - (vp * drawH / 100);
+    int yc = drawY + drawH - (vc * drawH / 100);
+    int top = (yp < yc) ? yp : yc;
+    if (top < drawY) top = drawY;
+    if (top < drawY + drawH) {
+      tft.drawLine(drawX + i, top, drawX + i, drawY + drawH, fillColor);
+    }
+  }
+
+  // 波形线
+  for (int i = 1; i < validPoints; i++) {
+    int vp = constrain(buf[i-1], 0, 100);
+    int vc = constrain(buf[i], 0, 100);
+    int yp = drawY + drawH - (vp * drawH / 100);
+    int yc = drawY + drawH - (vc * drawH / 100);
+    if (yp < drawY) yp = drawY;
+    if (yp > drawY + drawH) yp = drawY + drawH;
+    if (yc < drawY) yc = drawY;
+    if (yc > drawY + drawH) yc = drawY + drawH;
+    tft.drawLine(drawX + i - 1, yp, drawX + i, yc, color);
+  }
+
+  // 当前值（右上角）
+  int lastIdx = (waveIdx == 0) ? WAVE_POINTS - 1 : waveIdx - 1;
+  int lastVal = constrain(buf[lastIdx], 0, 100);
+  tft.setTextSize(1);
+  tft.setTextColor(color);
+  tft.fillRect(drawX + drawW - 34, drawY + 1, 32, 10, 0x0821);
+  tft.drawString(String(lastVal) + "%", drawX + drawW - 32, drawY + 2);
+  tft.setTextColor(C_VALUE);
+}
+
+void drawMainUI() {
+  // ===== 蓝牙状态（标题栏右侧）=====
+  static bool lastBle = false;
+  if (firstRun || lastBle != bleConnected) {
+    tft.fillRectVGradient(252, 2, 66, TITLE_H - 4, C_TITLE1, C_TITLE2);
+    uint16_t dot = bleConnected ? C_OK : C_ALERT;
+    tft.fillCircle(262, 12, 4, dot);
+    tft.drawCircle(262, 12, 7, dot);
+    tft.setTextSize(1);
+    tft.setTextColor(C_VALUE);
+    tft.drawString(bleConnected ? "ON" : "OFF", 276, 6);
+    lastBle = bleConnected;
+  }
+
+  int vRightCpu = CPU_X + CARD_W - 8;
+  int vRightGpu = GPU_X + CARD_W - 8;
+
+  // ===== CPU =====
+  if (firstRun || lastData.cpuLoad != dataPack.cpuLoad) {
+    tft.fillRect(36, CARD_Y + 26, 116, 18, C_CARD);
+    String s = String(dataPack.cpuLoad, 0) + "%";
+    drawValue(vRightCpu, CARD_Y + 26, s, C_CPU);
+    drawBar(CPU_X + 8, CARD_Y + 50, CARD_W - 16, 6, dataPack.cpuLoad);
+  }
+  if (firstRun || lastData.cpuTemp != dataPack.cpuTemp) {
+    tft.fillRect(36, CARD_Y + 60, 116, 16, C_CARD);
+    drawValue(vRightCpu, CARD_Y + 60, fmtValue(dataPack.cpuTemp, 1, "C"), C_VALUE);
+  }
+  if (firstRun || lastData.cpuPower != dataPack.cpuPower) {
+    tft.fillRect(36, CARD_Y + 76, 116, 16, C_CARD);
+    drawValue(vRightCpu, CARD_Y + 76, fmtValue(dataPack.cpuPower, 1, "W"), C_WARN);
+  }
+  if (firstRun || lastData.cpuFan != dataPack.cpuFan) {
+    tft.fillRect(36, CARD_Y + 92, 116, 16, C_CARD);
+    drawValue(vRightCpu, CARD_Y + 92, fmtValue(dataPack.cpuFan, 0, ""), C_OK);
+  }
+  drawWaveGraph(CPU_X, WAVE_Y, CARD_W, WAVE_H, cpuWave, lastCpuWave, C_CPU, C_CPU_DIM);
+
+  // ===== GPU =====
+  if (firstRun || lastData.gpuLoad != dataPack.gpuLoad) {
+    tft.fillRect(196, CARD_Y + 26, 116, 18, C_CARD);
+    String s = String(dataPack.gpuLoad, 0) + "%";
+    drawValue(vRightGpu, CARD_Y + 26, s, C_GPU);
+    drawBar(GPU_X + 8, CARD_Y + 50, CARD_W - 16, 6, dataPack.gpuLoad);
+  }
+  if (firstRun || lastData.gpuTemp != dataPack.gpuTemp) {
+    tft.fillRect(196, CARD_Y + 60, 116, 16, C_CARD);
+    drawValue(vRightGpu, CARD_Y + 60, fmtValue(dataPack.gpuTemp, 1, "C"), C_VALUE);
+  }
+  if (firstRun || lastData.gpuMem != dataPack.gpuMem ||
+      lastData.gpuMemTotal != dataPack.gpuMemTotal) {
+    tft.fillRect(196, CARD_Y + 76, 116, 16, C_CARD);
+    drawValue(vRightGpu, CARD_Y + 76, fmtVram(dataPack.gpuMem, dataPack.gpuMemTotal), C_GPU);
+  }
+  if (firstRun || lastData.gpuPower != dataPack.gpuPower) {
+    tft.fillRect(196, CARD_Y + 92, 116, 16, C_CARD);
+    drawValue(vRightGpu, CARD_Y + 92, fmtValue(dataPack.gpuPower, 1, "W"), C_WARN);
+  }
+  drawWaveGraph(GPU_X, WAVE_Y, CARD_W, WAVE_H, gpuWave, lastGpuWave, C_GPU, C_GPU_DIM);
+
+  // ===== 底部 =====
+  if (firstRun || lastData.memUsed != dataPack.memUsed) {
+    tft.fillRect(36, BOT_Y1, 120, 12, C_BG);
+    tft.setTextColor(C_VALUE);
+    tft.setTextSize(1);
+    tft.drawString(String(dataPack.memUsed, 0) + "%", 44, BOT_Y1);
+    drawBar(CPU_X + 8, BOT_Y1 + 14, CARD_W - 16, 6, dataPack.memUsed);
+  }
+  if (firstRun || lastData.hddTemp != dataPack.hddTemp) {
+    tft.fillRect(36, BOT_Y2, 120, 12, C_BG);
+    tft.setTextColor(C_ORANGE);
+    tft.setTextSize(1);
+    tft.drawString(fmtValue(dataPack.hddTemp, 1, "C"), 44, BOT_Y2);
+  }
+  if (firstRun || lastData.fps != dataPack.fps) {
+    tft.fillRect(GPU_X + 28, BOT_Y2, 124, 12, C_BG);
+    uint16_t fpsColor = (dataPack.fps > 120) ? C_OK : (dataPack.fps > 60) ? C_WARN : C_ALERT;
+    tft.setTextColor(fpsColor);
+    tft.setTextSize(1);
+    tft.drawString(String(dataPack.fps, 0) + " FPS", GPU_X + 28, BOT_Y2);
+  }
+
+  if (firstRun) {
+    firstRun = false;
+  }
+  lastData = dataPack;
+}

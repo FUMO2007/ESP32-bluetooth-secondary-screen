@@ -1,0 +1,49 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ST7789 屏幕引脚【ESP32-S3】
+#define TFT_MOSI  37
+#define TFT_SCLK  35
+#define TFT_CS    10
+#define TFT_DC    11
+#define TFT_RST   12
+#define TFT_BL    13
+#define TFT_WIDTH  320
+#define TFT_HEIGHT 240
+
+// BLE UUID
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHAR_WRITE_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define BLE_DEVICE_NAME     "PC-MONITOR-ST7789"
+
+// BLE MTU 配置
+#define BLE_MTU_SIZE 128
+
+// 波形与刷新配置
+#define WAVE_POINTS 140
+#define REFRESH_DELAY 200
+
+// 硬件数据结构体 (12个字段)
+struct HardwareData {
+  float cpuLoad;
+  float cpuTemp;
+  float cpuFan;
+  float cpuPower;
+  float gpuLoad;
+  float gpuTemp;
+  float gpuMem;
+  float gpuFan;
+  float gpuPower;
+  float fps;
+  float memUsed;
+  float hddTemp;
+};
+
+// 外部全局变量声明
+extern int cpuWave[WAVE_POINTS];
+extern int gpuWave[WAVE_POINTS];
+extern uint16_t waveIdx;
+extern HardwareData dataPack;
+extern bool bleConnected;
+
+#endif

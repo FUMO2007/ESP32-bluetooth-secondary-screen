@@ -1,0 +1,142 @@
+#include "ble_service.h"
+
+BLEServer *bleServer = nullptr;
+BLECharacteristic *writeChar = nullptr;
+BLECharacteristic *notifyChar = nullptr;
+
+// ---------------- 数据发布 ----------------
+// BLE 回调（蓝牙任务）写入 dataPack，主循环（loopTask）读取，
+// 两边并发访问 14 个 float 会撕裂，因此所有读写都在这把锁里整体完成。
+static portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t dataSeq = 0;        // 每成功解析一包 +1
+static volatile uint32_t lastPacketMs = 0;   // 最近一包的时间戳
+static uint32_t takenSeq = 0;                // 主循环已经消费到的序号
+
+bool bleDataSnapshot(HardwareData &out) {
+  uint32_t seq;
+  portENTER_CRITICAL(&dataMux);
+  out = dataPack;
+  seq = dataSeq;
+  portEXIT_CRITICAL(&dataMux);
+  return seq != 0;              // 从未收到过数据 -> false，UI 显示 "--"
+}
+
+bool bleDataTake(HardwareData &out, uint32_t &seq) {
+  bool isNew;
+  portENTER_CRITICAL(&dataMux);
+  out = dataPack;
+  seq = dataSeq;
+  isNew = (seq != takenSeq);
+  takenSeq = seq;
+  portEXIT_CRITICAL(&dataMux);
+  return isNew;
+}
+
+uint32_t bleLastPacketMs(void) {
+  return lastPacketMs;
+}
+
+uint32_t blePacketCount(void) {
+  return dataSeq;
+}
+
+class ServerCallback : public BLEServerCallbacks {
+  void onConnect(BLEServer* server) {
+    bleConnected = true;
+    Serial.println("BLE Device Connected");
+  }
+  
+  void onDisconnect(BLEServer* server) {
+    bleConnected = false;
+    bleServer->startAdvertising();
+    Serial.println("BLE Device Disconnected");
+  }
+};
+
+class CharCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *ch) {
+    String rawData = ch->getValue();
+    
+    if (rawData.length() == 0) {
+      Serial.println("Empty data received");
+      return;
+    }
+    
+    // 先解析到局部变量：解析失败或只解析出一半时，屏幕上不会出现混合帧
+    HardwareData tmp;
+    int parsed = sscanf(rawData.c_str(),
+      "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+      &tmp.cpuLoad, &tmp.cpuTemp, &tmp.cpuFan, &tmp.cpuPower,
+      &tmp.gpuLoad, &tmp.gpuTemp, &tmp.gpuMem,
+      &tmp.gpuFan, &tmp.gpuPower, &tmp.fps,
+      &tmp.memUsed, &tmp.hddTemp, &tmp.gpuMemTotal,
+      &tmp.cpuClk);
+    
+    if (parsed != 14) {
+      Serial.printf("Parse error: expected 14, got %d\n", parsed);
+      Serial.println("Raw: " + rawData);
+      return;
+    }
+    
+    tmp.cpuLoad = constrain(tmp.cpuLoad, 0, 100);
+    tmp.gpuLoad = constrain(tmp.gpuLoad, 0, 100);
+    tmp.fps = constrain(tmp.fps, 0, 1000);
+    tmp.memUsed = constrain(tmp.memUsed, 0, 100);
+    tmp.gpuMemTotal = constrain(tmp.gpuMemTotal, 0, 128);
+    tmp.cpuClk = constrain(tmp.cpuClk, 0, 20000);
+    
+    uint32_t now = millis();
+    portENTER_CRITICAL(&dataMux);
+    dataPack = tmp;
+    dataSeq++;
+    lastPacketMs = now;
+    portEXIT_CRITICAL(&dataMux);
+    
+    // 波形环形缓冲的推进放在主循环里（见 PC_Monitor.ino 的 wavePush），
+    // 那里和绘制是同一个任务，不需要再加锁。
+    
+    // 调试输出（按需开启）
+    // Serial.printf("CPU: %.1f%%, %.1fW | GPU: %.1f%%, %.1fW\n", 
+    //               tmp.cpuLoad, tmp.cpuPower, tmp.gpuLoad, tmp.gpuPower);
+  }
+};
+
+void bleInit() {
+  BLEDevice::init(BLE_DEVICE_NAME);
+  
+  #ifdef BLE_MTU_SIZE
+  BLEDevice::setMTU(BLE_MTU_SIZE);
+  Serial.printf("BLE MTU set to %d\n", BLE_MTU_SIZE);
+  #endif
+  
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new ServerCallback());
+
+  BLEService *service = bleServer->createService(SERVICE_UUID);
+  
+  writeChar = service->createCharacteristic(
+    CHAR_WRITE_UUID,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+  );
+  writeChar->setCallbacks(new CharCallback());
+  
+  // 通知特征
+  notifyChar = service->createCharacteristic(
+    "beb5483e-36e1-4688-b7f5-ea07361b26a9",
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  notifyChar->addDescriptor(new BLE2902());
+  
+  service->start();
+
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->setAppearance(0x00);
+  adv->setMinInterval(0x20);
+  adv->setMaxInterval(0x40);
+  adv->setName(BLE_DEVICE_NAME);
+  
+  adv->start();
+  Serial.println("BLE Advertising started");
+}

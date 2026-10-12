@@ -1,0 +1,18 @@
+# PC 端运行时依赖
+# ---------------------------------------------------------------------------
+# 安装：
+#     python -m pip install -r requirements.txt
+#
+# 版本按开发机上实际验证过的 venv（D:\PC_Monitor\PC端\venv）钉死，
+# 避免"换台机器装到新版就跑不起来"。要做协议/采集改动时先跑一遍
+#     pwsh -File build.ps1
+# 确认三个测试都还是绿的再动。
+#
+# 只需要前三个就能跑采集 + BLE 发送：
+psutil==7.2.2        # CPU/内存/磁盘/网络 派生数据
+bleak==3.0.2         # BLE 客户端（连接 ESP32 并写特征值）
+pythonnet==3.1.0     # 提供 clr，加载 LibreHardwareMonitorLib.dll
+
+# 只有打包成 exe 时才需要（可选，按需单独装）：
+#     python -m pip install pyinstaller==6.21.0
+# pyinstaller==6.21.0
