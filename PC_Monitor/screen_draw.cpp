@@ -1298,6 +1298,43 @@ void drawStaticUI() {
   drawStaticOverview();
 }
 
+// ===================== 页面可用性（"--" 整页就不翻过去）=====================
+//  用户的要求：某一页整页都是 "--"（该页指标全读不到）时，轮播不要翻到那一页。
+//  典型的三种情形：
+//    · PC 端某个传感器读不到（比如没装 PresentMon 时的 FPS）-> 那一页只剩骨架
+//    · A 卡/笔记本平台读不到风扇转速 -> 散热页有一半是 "--"
+//    · 刚连上、波形还没攒够样本 -> 趋势页是个空网格
+//  判定只看"这一页自己要显示的指标"，不看 PKTS/RATE 这类永远有值的诊断量 ——
+//  否则任何一页都会因为它们在而有值，规则形同虚设。
+static bool pageHasData(uint8_t page, const HardwareData &d) {
+  struct Ok { static bool v(float x) { return x >= 0.0f; } };   // -1 = 哨兵（读不到）
+  switch (page) {
+    case P_OVERVIEW:
+      return Ok::v(d.cpuLoad) || Ok::v(d.gpuLoad) || Ok::v(d.memUsed) || Ok::v(d.fps) ||
+             Ok::v(d.cpuTemp) || Ok::v(d.gpuTemp) || Ok::v(d.cpuClk) || Ok::v(d.gpuClk);
+    case P_THERMAL:
+      return Ok::v(d.cpuTemp) || Ok::v(d.gpuTemp) || Ok::v(d.hddTemp) ||
+             Ok::v(d.gpuHotspot) || Ok::v(d.gpuMemTemp) ||
+             Ok::v(d.cpuFan) || Ok::v(d.gpuFan) || Ok::v(d.moboFan);
+    case P_TREND:
+      // 趋势页画的是历史：一个样本都还没推进过时翻过去只能看到空网格
+      return waveCount > 0 && (Ok::v(d.cpuLoad) || Ok::v(d.gpuLoad));
+    case P_IO:
+      return Ok::v(d.diskRead) || Ok::v(d.diskWrite) || Ok::v(d.diskUsed) ||
+             Ok::v(d.netDown) || Ok::v(d.netUp) || Ok::v(d.pingMs) || Ok::v(d.procCount);
+  }
+  return true;
+}
+
+// 从 cur 往后找第一个"有东西可看"的页；一个都没有就返回 cur（停在原地，不翻空页）
+static uint8_t nextShowablePage(uint8_t cur, const HardwareData &d) {
+  for (uint8_t i = 1; i <= PAGE_COUNT; i++) {
+    uint8_t p = (uint8_t)((cur + i) % PAGE_COUNT);
+    if (pageHasData(p, d)) return p;
+  }
+  return cur;
+}
+
 // ===================== 开机画面：状态与前置声明 =====================
 //  实现在文件后半的「开机动画」一节。主循环的入口 drawMainUI() 定义在它前面，
 //  而 C++ 里"用在前、定义在后"必须先有声明，所以阶段枚举、共享状态和要用到的
@@ -1401,9 +1438,12 @@ void drawMainUI() {
     if (curPage != want) { curPage = want; pageSwitched = true; }
     // 不清零 pageStartMs：锁页一结束就接着往下翻，不再白等一个 PAGE_MS
   } else if ((uint32_t)(c.now - pageStartMs) >= PAGE_MS) {
-    curPage = (uint8_t)((curPage + 1) % PAGE_COUNT);
+    // 翻页时跳过"整页都是 --"的页（见 pageHasData 的说明）。
+    // 一个可看的页都没有就停在原地 —— 不为了轮播而轮播到空页上。
+    uint8_t next = nextShowablePage(curPage, c.d);
+    if (next != curPage) { curPage = next; pageSwitched = true; }
+    // 无论有没有翻成，都重置计时：否则数据恢复的那一刻会立刻又翻一次
     pageStartMs = c.now;
-    pageSwitched = true;
   }
 #endif
 

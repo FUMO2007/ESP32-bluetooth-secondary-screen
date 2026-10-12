@@ -120,6 +120,14 @@ static void publishHandshake(void) {
   g_lastMs = millis();
 }
 
+// 把 IO 页自己要显示的指标全部置成哨兵（-1 = 读不到）：
+// 用来验证"整页都是 -- 就不该轮播过去"
+static void invalidateIoPage(void) {
+  g_data.diskRead = -1; g_data.diskWrite = -1; g_data.diskUsed = -1;
+  g_data.netDown  = -1; g_data.netUp    = -1;
+  g_data.pingMs   = -1; g_data.pingLoss = -1; g_data.procCount = -1;
+}
+
 // ---------------- 页面识别（靠每页独有的像素特征，和渲染代码解耦）----------------
 //  趋势页：大图底色 0x0861
 //  IO 页：左卡片主指标条用青色 0x07FF（概览页的主指标条是绿/橙）
@@ -138,6 +146,14 @@ static int detectPage() {
 static int pageDotOk(int page) {
   int x = 162 + (page - 1) * 16;                 // DOT_X + i*DOT_DX
   return simCountColor(x - 3, 8, x + 4, 15, 0xFFFF);   // 当前页是实心白点
+}
+
+// 用标题栏的页码圆点判断当前页。比 detectPage() 稳：整页都是 "--" 时那些
+// "颜色特征"（IO 页的青色大字、趋势页的波形底）根本不会出现，detectPage() 会
+// 退化成返回 1；而圆点无论有没有数据都画着。
+static int detectDotPage() {
+  for (int p = 1; p <= 4; p++) if (pageDotOk(p) > 0) return p;
+  return 0;
 }
 
 // 标签列逐像素比对（见 preview_impl.cpp: simLabelIntact）
@@ -631,6 +647,49 @@ int main() {
          toThermal, redHero);
   printf("  结论：%s\n",
          (pgPin == 2 && pgHold == 2 && pgAfter != 2 && redHero > 0) ? "通过" : "失败");
+
+  // ---------------- 整页都是 "--" 的页不轮播过去 ----------------
+  //  实测会遇到的三种：没装 PresentMon 时 FPS 相关字段读不到；A 卡/笔记本读不到
+  //  风扇转速；刚连上时趋势页还没攒够样本。这种页翻过去只有骨架和一排 --，
+  //  所以轮播时跳过它们（判定在 screen_draw.cpp 的 pageHasData）。
+  printf("\n--- 整页都是 -- 的页不轮播过去 ---\n");
+  int seenPages[5] = {0, 0, 0, 0, 0};
+  int ioFrames = 0;
+  for (int f = 0; f < 250; f++) {                // 50 秒 ≈ 5.5 个轮播周期
+    publish(1000 + f);                           // 正常数据（顺带把 96 度的告警清掉）
+    g_data.cpuTemp = 60.0f;
+    invalidateIoPage();                          // 但 IO 页的指标全读不到
+    simAdvanceMs(200); loop();
+    int pg = detectDotPage();
+    if (pg == 4) ioFrames++;
+    if (pg >= 1 && pg <= 4) seenPages[pg] = 1;
+  }
+  printf("  50 秒内停在 IO 页的帧数 = %d（期望 0）\n", ioFrames);
+  printf("  期间出现过的页：概览=%d 散热=%d 趋势=%d IO=%d（IO 期望 0，其余期望 1）\n",
+         seenPages[1], seenPages[2], seenPages[3], seenPages[4]);
+  if (ioFrames || !seenPages[1] || !seenPages[2] || !seenPages[3]) {
+    printf("  !! IO 页整页是 -- 时仍然被轮播到了\n");
+  }
+
+  // 全部指标都读不到：一页可看的都没有 -> 停在当前页，不为了轮播而轮播
+  int stayPg = -1, stayChanges = 0;
+  for (int f = 0; f < 130; f++) {                // 26 秒 ≈ 2.9 个轮播周期
+    publishHandshake();                          // 全字段哨兵（等同 PC 端的握手包）
+    simAdvanceMs(200); loop();
+    int pg = detectDotPage();
+    if (stayPg < 0) stayPg = pg;
+    else if (pg != stayPg) stayChanges++;
+  }
+  printf("  全部指标都是 -- 时：26 秒内换页 %d 次（期望 0，停在页 %d）\n",
+         stayChanges, stayPg);
+  if (stayChanges) printf("  !! 没有数据时仍在翻页\n");
+  simSaveBmp("preview_nodata.bmp");
+
+  // 收尾：恢复真实数据并等回概览页 —— 否则后面那张 preview_live.bmp 会停在一片 -- 上
+  for (int f = 0; f < 200 && detectDotPage() != 1; f++) {
+    publish(1400 + f); simAdvanceMs(200); loop();
+  }
+  printf("  恢复数据后回到页 %d（期望 1：概览页，供 preview_live.bmp 使用）\n", detectDotPage());
 
   simSaveBmp("preview_live.bmp");
   printf("\nwaveIdx=%u waveCount=%u\n", waveIdx, waveCount);
