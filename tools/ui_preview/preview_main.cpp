@@ -173,25 +173,26 @@ int main() {
   //    · 状态：等 PC = 黄，已连接等数据 = 青；超时后出现提示行
   //    · 频闪红线：启动动画的稳态帧"直接画到屏幕的文字次数"必须是 0
   //    · 切页：连上并收到数据后进数据页，且数据页盖不到的缝隙里没有启动画面残留
-  //  版面数字（62/146/162/188/212）来自 screen_draw.cpp 的 BOOT_* 宏，改那边要同步改这里。
+  //  版面数字（54/146/162/188/212）来自 screen_draw.cpp 的 BOOT_* 宏，改那边要同步改这里。
   printf("\n=== 0) 开机画面（连上 PC 之前）===\n");
   bleConnected = false;                       // 还没连上
   int bootBad = 0;
-  const int bTitleY = 62, bTrackX = 60, bTrackY = 146, bTrackW = 200;
+  const int bTitleY = 54, bTitleH = 32;       // 品牌位图（奶娃科技）32px 高
+  const int bTrackX = 60, bTrackY = 146, bTrackW = 200;
   const int bStatusY = 162, bHintY = 188, bDevY = 212;
 
   printf("  上电即在启动画面=%d（期望 1）  detectPage()=%d（期望 0：不是任何一页）\n",
          (int)uiBooting(), detectPage());
   if (!uiBooting() || detectPage() != 0) { bootBad++; printf("  !! 上电没有停在启动画面\n"); }
 
-  // ---- 大标题：白墨存在且左右居中（Font4 在仿真里是等宽占位块，但宽度表是真实的）----
-  int tL = simLeftmostNonBg(0, bTitleY, 320, bTitleY + 26, 0x0000);
-  int tR = simRightmostNonBg(0, bTitleY, 320, bTitleY + 26, 0x0000);
-  int tWhite = simCountColor(0, bTitleY, 320, bTitleY + 26, 0xFFFF);
-  printf("  大标题：白墨 %d 像素，落点 x %d..%d（居中偏差 %d，期望 <=3）\n",
-         tWhite, tL, tR, abs(tL - (319 - tR)));
-  if (tWhite < 200 || tL < 0 || tR < 0 || abs(tL - (319 - tR)) > 3) {
-    bootBad++; printf("  !! 大标题缺失或没有居中\n");
+  // ---- 品牌位图：白墨存在且左右居中（内置字体没有汉字，只能用位图；这里只验落点）----
+  int tL = simLeftmostNonBg(0, bTitleY, 320, bTitleY + bTitleH, 0x0000);
+  int tR = simRightmostNonBg(0, bTitleY, 320, bTitleY + bTitleH, 0x0000);
+  int tWhite = simCountColor(0, bTitleY, 320, bTitleY + bTitleH, 0xFFFF);
+  printf("  品牌位图：白墨 %d 像素，落点 x %d..%d（宽 %d，居中偏差 %d，期望 <=2）\n",
+         tWhite, tL, tR, tR - tL + 1, abs(tL - (319 - tR)));
+  if (tWhite < 500 || tL < 0 || tR < 0 || abs(tL - (319 - tR)) > 2) {
+    bootBad++; printf("  !! 品牌位图缺失或没有居中\n");
   }
 
   // ---- 10 帧动画：高亮必须动，而且不越出底槽 ----

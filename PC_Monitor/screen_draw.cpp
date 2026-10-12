@@ -24,6 +24,7 @@
 #include "screen_draw.h"
 #include "ble_service.h"
 #include "proto.h"      // PROTO_NAME_MAX（型号名长度）
+#include "boot_logo.h"  // 开机画面的品牌位图（tools/make_logo.py 生成，勿手改）
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -1483,16 +1484,16 @@ void drawMainUI() {
 //  （regionBegin/regionEnd），不留"先擦后画"的空窗 —— 与数据页的刷新规矩一致。
 //  扫描条一个来回 2.4 秒，帧率由 config.h 的 BOOT_FRAME_MS 决定（默认 33ms≈30fps）。
 //
-//  版面（320x240，全部用 TL_DATUM + 手工居中：仿真里只实现了 TL/TR 基准）
+// 版面（320x240，全部用 TL_DATUM + 手工居中：仿真里只实现了 TL/TR 基准）
 //    y 0..21    标题栏（复用 drawTitleBar："PC MONITOR" + BOOTING + 链路胶囊）
-//    y 62..88   Font4 大标题 "PC MONITOR"
+//    y 54..85   品牌字位图（"奶娃科技"，8 位 alpha，由 tools/make_logo.py 生成）
 //    y 98..106  小字 "SYSTEM TELEMETRY"
 //    y 114..120 三色强调条（CPU 绿 / 青 / GPU 橙）
 //    y 146..156 扫描条（底槽 + 44px 高亮来回扫）
 //    y 162..178 状态文字（字体 1 放大 2 倍）
 //    y 188..196 超过 BOOT_HINT_MS 还没连上时追加的一行提示
 //    y 212..220 BLE 设备名
-#define BOOT_TITLE_Y   62
+#define BOOT_TITLE_Y   54        // 品牌位图的顶边（高 32，占 54..85）
 #define BOOT_CAP_Y     98
 #define BOOT_ACC_Y     114
 #define BOOT_ACC_W     120
@@ -1514,10 +1515,36 @@ uint16_t uiFrameMs() {
 bool uiBooting() { return uiPhase == UI_BOOT; }
 
 // 居中的小工具（TL_DATUM + 手工算宽度；字体 1 是 6px/字符，放大 n 倍就是 6n）
-static int bootTextX(const char *s, uint8_t font, uint8_t size) {
-  int w = (font == 1) ? (int)strlen(s) * 6 * (int)size
-                      : (int)tft.textWidth(s, font);
-  return (SCR_W - w) / 2;
+static int bootTextX(const char *s, uint8_t size) {
+  return (SCR_W - (int)strlen(s) * 6 * (int)size) / 2;
+}
+
+// 按 alpha 把前景色混到背景色上（RGB565 各分量线性插值）
+static uint16_t blend565(uint16_t fg, uint16_t bg, uint8_t a) {
+  uint16_t fr = (fg >> 11) & 0x1F, fg6 = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+  uint16_t br = (bg >> 11) & 0x1F, bg6 = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+  uint16_t r = (uint16_t)((fr * a + br * (255 - a)) / 255);
+  uint16_t g = (uint16_t)((fg6 * a + bg6 * (255 - a)) / 255);
+  uint16_t b = (uint16_t)((fb * a + bb * (255 - a)) / 255);
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// 画品牌位图（tools/make_logo.py 生成的 8 位 alpha）。
+//  为什么自己混合、不用库的 pushImage：4/8 位 pushImage 画出来的是**灰度**，
+//  不是"品牌色按 alpha 混到背景上"（白字会变灰字）；而且离线仿真的桩里没有
+//  pushImage，自定义混合能保证仿真与真机渲染逐像素一致。
+//  走离屏画布推送：逐点 drawPixel 到 SPI 会很慢（四千多次），先进画布再一次推。
+static void bootDrawLogo(int x, int y) {
+  Canvas c = regionBegin(x, y, BOOT_LOGO_W, BOOT_LOGO_H, C_BG);
+  TFT_eSPI &g = *c.g;
+  for (int j = 0; j < BOOT_LOGO_H; j++) {
+    for (int i = 0; i < BOOT_LOGO_W; i++) {
+      uint8_t a = BOOT_LOGO_ALPHA[j * BOOT_LOGO_W + i];
+      if (a == 0) continue;                       // 背景已由 regionBegin 填好
+      g.drawPixel(x + i + c.dx, y + j + c.dy, blend565(C_VALUE, C_BG, a));
+    }
+  }
+  regionEnd(c, x, y, BOOT_LOGO_W, BOOT_LOGO_H);
 }
 
 static void bootDrawStatic() {
@@ -1525,16 +1552,13 @@ static void bootDrawStatic() {
   drawBlePill();
   bootLastPill = bleConnected;
 
-  tft.setTextFont(4);
-  tft.setTextSize(1);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_VALUE, C_BG);
-  tft.drawString("PC MONITOR", bootTextX("PC MONITOR", 4, 1), BOOT_TITLE_Y);
+  // 品牌字：内置字体没有汉字字形，所以用位图（见 tools/make_logo.py）
+  bootDrawLogo((SCR_W - BOOT_LOGO_W) / 2, BOOT_TITLE_Y);
 
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setTextColor(C_LABEL_DIM, C_BG);
-  tft.drawString("SYSTEM TELEMETRY", bootTextX("SYSTEM TELEMETRY", 1, 1), BOOT_CAP_Y);
+  tft.drawString("SYSTEM TELEMETRY", bootTextX("SYSTEM TELEMETRY", 1), BOOT_CAP_Y);
 
   // 三色强调条：左右各 36px 品牌色，中间青色，段间留 6px
   {
@@ -1548,7 +1572,7 @@ static void bootDrawStatic() {
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setTextColor(C_LABEL_DIM, C_BG);
-  tft.drawString(BLE_DEVICE_NAME, bootTextX(BLE_DEVICE_NAME, 1, 1), BOOT_DEV_Y);
+  tft.drawString(BLE_DEVICE_NAME, bootTextX(BLE_DEVICE_NAME, 1), BOOT_DEV_Y);
 }
 
 // 状态文字：0 刚上电 / 1 等 PC 连接 / 2 已连接等数据 / 3 收到数据（马上切页）

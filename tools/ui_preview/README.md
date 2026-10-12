@@ -88,7 +88,8 @@ g++ -std=gnu++11 -I tools\ui_preview -I PC_Monitor tools\ui_preview\proto_test.c
 ## 断言覆盖了什么
 
 - **开机画面**（第 0 段，先于所有页面断言）：上电后处于启动画面而不是数据页
-  （`uiBooting()` 为真、`detectPage()` 返回 0）；Font4 大标题的白墨左右居中（偏差 ≤3px）；
+  （`uiBooting()` 为真、`detectPage()` 返回 0）；品牌位图（"奶娃科技"）的白墨左右居中
+  （实测宽 131px、偏差 1px）；
   扫描条的高亮逐帧在动（10 帧里至少 6 个不同位置）且始终在底槽内；
   等 PC 时状态行是黄的、连上后转青；超过 `BOOT_HINT_MS` 出现 "START THE PC APP ON THIS PC"；
   稳态帧"直接画到屏幕的文字次数=0"（动画也走离屏画布）；
@@ -123,6 +124,8 @@ g++ -std=gnu++11 -I tools\ui_preview -I PC_Monitor tools\ui_preview\proto_test.c
 - **字体 1（数值、标签、单位）是真实点阵**，所以数字能直接看清；
   **字体 2 / 4（卡片标题 "CPU"/"GPU"、顶部标题、hero 大字）画成等宽棋盘格占位块**，
   只用于核对位置和尺寸，不代表真实字形。
+  **例外：开机画面的品牌字"奶娃科技"是 8 位 alpha 位图**（内置字体没有汉字字形），
+  固件里按 `drawPixel` 逐点混合 —— 所以预览图里那四个字是**真机上的真实效果**。
 - 圆角、sprite 推送、文本基准（TL/TR_DATUM）都按真实库的行为实现；但 `fillRoundRect`
   的圆角像素与真实库可能差 1px，属正常。
 - `String` 是简化的 `std::string` 实现，浮点格式化用 `snprintf("%.*f")`，与 Arduino
@@ -161,10 +164,12 @@ g++ -std=gnu++11 -I tools\ui_preview -I PC_Monitor tools\ui_preview\proto_test.c
   （踩过坑：页脚 `SAMPLE` → 改 `RATE`；系统卡片 `UPTIME` 用了 42px 专用列宽）。
 - 新增布局常量后补一条 `static_assert`，越界会直接编译失败
   （踩过坑：系统卡片内容溢出 2px、波形区多出 4px 盖住卡片右边框）。
-- **开机画面的版面数字在 `preview_main.cpp` 第 0 段里是手抄的**（`bTitleY=62` /
+- **开机画面的版面数字在 `preview_main.cpp` 第 0 段里是手抄的**（`bTitleY=54` /
   `bTrackY=146` / `bStatusY=162` / `bHintY=188` / `bDevY=212`，来自 `screen_draw.cpp`
   的 `BOOT_*` 宏）。改那边要同步改这里 —— 和 `detectPage()` 里那几个手抄的
   `MET_BAR_X/MID_Y` 是同一个约定。
+- 品牌字要改字/换字体：改 `tools/make_logo.py` 的 `TEXT` / `FONT_CANDIDATES`，
+  跑一次重新生成 `PC_Monitor/boot_logo.h`（需要 Pillow，只是开发期工具）。
 
 ## 别用 PowerShell 碰源文件
 
