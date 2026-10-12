@@ -22,8 +22,8 @@ import ctypes
 import ctypes.wintypes
 import subprocess
 import threading
+import hashlib
 import collections
-from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List
 
 # ===== 打包后重定向输出到 null（完全静默）=====
@@ -109,15 +109,40 @@ def _ini_problem(msg: str):
         _INI_PROBLEMS.append(msg)
 
 
-def _load_ini():
-    """读同目录下的 pc_monitor.ini（可选）。格式：一行一条 key=value，# 开头是注释。
-    文件不存在是正常情况（全部用默认值）。"""
-    cfg = {}
-    path = os.path.join(get_app_dir(), 'pc_monitor.ini')
+class _IniValues(dict):
+    """ini 的键值表。**访问过的键都记下来**，好在本文件后面报告"写了却没生效的键"。
+
+    动机：键名拼错（`USRE_NAME=…`）以前是完全静默的 —— 用户以为改生效了，
+    程序照旧用默认值，屏幕上一点变化都没有，只能靠猜。这属于本项目
+    "出问题必须留痕"的原则。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.used = set()
+
+    def get(self, key, default=None):
+        self.used.add(key)
+        return super().get(key, default)
+
+
+def _load_ini(path=None):
+    """读一个 ini 文件（默认是同目录下的 pc_monitor.ini，可选）。
+    格式：一行一条 key=value，# 开头是注释。文件不存在是正常情况（全部用默认值）。
+
+    path 参数是给测试用的：这样"带 BOM 的 ini"这类情形不用真的往程序目录写文件。
+    """
+    cfg = _IniValues()
+    if path is None:
+        path = os.path.join(get_app_dir(), 'pc_monitor.ini')
     if not os.path.exists(path):
         return cfg
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        # encoding='utf-8-sig'：记事本"UTF-8"另存会把 BOM 写进文件头，
+        # 用 'utf-8' 读的话第一个键会变成 '\ufeffPING_HOST' —— 它不等于 'PING_HOST'，
+        # 于是那一条**静默失效**（只有第一条会中招，最难发现）。utf-8-sig 会自动吃掉 BOM。
+        # 顺带：读到 GBK 文件会抛异常走下面的分支，而不是解码成乱码键名。
+        with open(path, 'r', encoding='utf-8-sig') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#') or '=' not in line:
@@ -137,6 +162,7 @@ _INI = _load_ini()
 
 
 def _ini_int(key, default):
+    _INI.used.add(key)
     if key not in _INI:
         return default
     try:
@@ -147,6 +173,7 @@ def _ini_int(key, default):
 
 
 def _ini_float(key, default):
+    _INI.used.add(key)
     if key not in _INI:
         return default
     try:
@@ -155,9 +182,37 @@ def _ini_float(key, default):
         _ini_problem('%s = %r 不是数字，改用默认值 %r' % (key, _INI[key], default))
         return default
 
+
+def _ini_choice(key, default, allowed):
+    """取一个枚举值（大小写不敏感）。不在 allowed 里就报警并退回默认值。
+
+    以前这种值是直接 .strip().lower() 用的：`FPS_SOURCE = presentmno` 会被
+    静默当成"不是 auto / presentmon / rtss / none"，各处的 if 全不匹配，
+    表现是"帧率永远是 --"，而日志里一个字都没有。
+    """
+    _INI.used.add(key)
+    raw = _INI.get(key, default).strip().lower()
+    if raw not in allowed:
+        _ini_problem('%s = %r 不是 %s 之一，改用默认值 %r'
+                     % (key, _INI.get(key), '/'.join(allowed), default))
+        return default
+    return raw
+
+
+def _report_unknown_ini_keys():
+    """把"ini 里写了、但本程序从没读过"的键报出来（拼错键名就靠它发现）。"""
+    unknown = sorted(set(_INI) - _INI.used)
+    if unknown:
+        _ini_problem('ini 里这些键没被认出来（键名拼错了？本程序不会读它们）：%s'
+                     % '、'.join(unknown))
+
+
 # 将 dlls 文件夹添加到系统路径
-if os.path.exists(dlls_path) and dlls_path not in os.environ['PATH']:
-    os.environ['PATH'] = dlls_path + os.pathsep + os.environ['PATH']
+# 用 .get('PATH', '')：极少数环境（服务/精简容器）里根本没有 PATH 变量，
+# 直接下标会抛 KeyError，而这个 KeyError 发生在导入期，报出来完全看不出是 PATH 的事。
+_PATH_ENV = os.environ.get('PATH', '')
+if os.path.exists(dlls_path) and dlls_path not in _PATH_ENV:
+    os.environ['PATH'] = dlls_path + os.pathsep + _PATH_ENV
 
 # ===== 日志 =====
 # 以前这里是 logging.CRITICAL + NullHandler，再加上打包后 stdout/stderr 被重定向到
@@ -214,23 +269,41 @@ def _fatal(msg: str):
 from bleak import BleakScanner, BleakClient, BleakError
 
 
+def _ini_ranged(key, default, lo, hi, integer=False):
+    """取一个带范围的数值：超范围就报警并夹到边界，不是静默接受。
+
+    为什么非夹不可（都是"改一个数字"就能造成的难查故障）：
+      COLLECT_INTERVAL = 0     -> 主循环满速忙等，把 CPU 吃满，而这台机器自己
+                                  就在监控 CPU 占用，屏幕上会看到"自己把自己顶满"
+      PING_WINDOW = 0          -> 丢包率的分母是 0，LOSS 恒显示 0.0
+      AUTO_EXIT_MINUTES = 0    -> "连不上就退出"立刻触发，程序一闪而过
+    """
+    raw = _ini_int(key, default) if integer else _ini_float(key, default)
+    if raw < lo or raw > hi:
+        fixed = min(max(raw, lo), hi)
+        _ini_problem('%s = %r 超出允许范围 [%s, %s]，改用 %r'
+                     % (key, raw, lo, hi, fixed))
+        raw = fixed
+    return int(raw) if integer else float(raw)
+
+
 # ===== 配置 =====
 class Config:
     DEVICE_NAME = _INI.get('DEVICE_NAME', "PC-MONITOR-ST7789").strip() or "PC-MONITOR-ST7789"
     CHAR_WRITE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
     LIBRE_DLL_PATH = os.path.join(dlls_path, "LibreHardwareMonitorLib.dll")
-    COLLECT_INTERVAL = _ini_float('COLLECT_INTERVAL', 1.0)  # 采集间隔（秒）
+    COLLECT_INTERVAL = _ini_ranged('COLLECT_INTERVAL', 1.0, 0.1, 60.0)  # 采集间隔（秒）
     # 下面这些以前是硬编码的，但它们恰恰是用户最想调的几个 ——
     # 尤其是 AUTO_EXIT_MINUTES（程序会自己关掉）和 MAX_RECONNECT_ATTEMPTS
     # （刷几次固件程序就永久退出）。ini 存在的意义就是"改参数不用重新打包"。
-    MAX_RECONNECT_ATTEMPTS = _ini_int('MAX_RECONNECT_ATTEMPTS', 3)
-    SCAN_TIMEOUT = _ini_float('SCAN_TIMEOUT', 5)
-    CONNECT_TIMEOUT = _ini_float('CONNECT_TIMEOUT', 10)
-    AUTO_EXIT_MINUTES = _ini_int('AUTO_EXIT_MINUTES', 10)  # 连不上 N 分钟后自动退出
+    MAX_RECONNECT_ATTEMPTS = _ini_ranged('MAX_RECONNECT_ATTEMPTS', 3, 0, 100, integer=True)
+    SCAN_TIMEOUT = _ini_ranged('SCAN_TIMEOUT', 5.0, 1.0, 120.0)
+    CONNECT_TIMEOUT = _ini_ranged('CONNECT_TIMEOUT', 10.0, 1.0, 300.0)
+    AUTO_EXIT_MINUTES = _ini_ranged('AUTO_EXIT_MINUTES', 10, 1, 1440, integer=True)
 
     # ---- 协议 ----
-    PROTOCOL = _INI.get('PROTOCOL', 'binary').strip().lower()
-    NAMES_RESEND_SEC = _ini_float('NAMES_RESEND_SEC', 60)  # 型号名重发间隔（秒）
+    PROTOCOL = _ini_choice('PROTOCOL', 'binary', ('binary', 'csv'))
+    NAMES_RESEND_SEC = _ini_ranged('NAMES_RESEND_SEC', 60.0, 5.0, 3600.0)
 
     # ---- 真帧率 ----
     # 'auto'       = 先试 PresentMon，再试 RTSS（装了哪个就用哪个，都不用装）
@@ -238,7 +311,7 @@ class Config:
     # 'rtss'       = 只用 RTSS
     # 'none'       = 不测帧率，屏幕永远是 "--"
     # 两个来源都拿不到数据时一律上报"无效"（0xFFFF -> 屏幕显示 --），**绝不猜一个数**。
-    FPS_SOURCE = _INI.get('FPS_SOURCE', 'auto').strip().lower()
+    FPS_SOURCE = _ini_choice('FPS_SOURCE', 'auto', ('auto', 'presentmon', 'rtss', 'none'))
     PRESENTMON_PATH = _INI.get('PRESENTMON_PATH', '').strip()   # 留空 = 自动查找
     RTSS_ENABLE = _ini_int('RTSS_ENABLE', 1) != 0
 
@@ -247,15 +320,46 @@ class Config:
     # 而 PING 超过 100ms 会变黄 —— 挂 Cloudflare 就会一直黄着，看着像坏了。
     # 想换目标不用重新打包：改 exe 旁边的 pc_monitor.ini 里的 PING_HOST / PING_PORT。
     PING_HOST = _INI.get('PING_HOST', "223.5.5.5")
-    PING_PORT = _ini_int('PING_PORT', 53)        # TCP 连接耗时，不需要管理员权限
-    PING_INTERVAL = _ini_float('PING_INTERVAL', 5.0)   # 探测间隔（秒）
-    PING_WINDOW = _ini_int('PING_WINDOW', 10)          # 用最近多少次探测统计丢包率
+    PING_PORT = _ini_ranged('PING_PORT', 53, 1, 65535, integer=True)
+    PING_INTERVAL = _ini_ranged('PING_INTERVAL', 5.0, 0.2, 600.0)
+    PING_WINDOW = _ini_ranged('PING_WINDOW', 10, 1, 1000, integer=True)
+
+
+# 放在 Config 之后：上面的类体已经把该读的键都读过了，这时才知道哪些键没人认领。
+_report_unknown_ini_keys()
 
 
 # ===== 协议实现（独立模块，便于离线单测；与固件 proto.cpp / PROTOCOL.md 一一对应）=====
 from proto_v2 import (pack_binary, pack_names as _pack_names, crc8,
                       PROTO_FIELD_COUNT, PROTO_PKT_DATA, PROTO_PKT_NAMES,
                       PROTO_INVALID, FIELD_KEYS, FIELD_SCALE)
+
+
+# 已经就"超量程"告警过的字段，避免每秒刷一条
+_SATURATION_WARNED = set()
+
+
+def _fit_field(key: str, value):
+    """值超出该字段的 uint16 量程时上报"无效"，而不是让它悄悄撞上限。
+
+    协议是定标 uint16（上限 65534，0xFFFF 留给哨兵），超量程以前是**静默夹住**的：
+    屏幕上是"一个看起来很正常的具体数字"，但它是错的 ——
+      uptime_min   ×1     -> 65534 分钟 = 45.5 天（连续开机两个多月后一直显示这个数）
+      net_up/down  ×100   -> 655.34 MB/s（万兆网卡跑满就顶在这个数上不动）
+      disk_read/write ×10 -> 6553.4 MB/s（PCIe 5.0 NVMe 顺序读能超过它）
+    按本项目"宁可显示 -- 也不显示编出来的数"的原则，超量程一律报无效。
+    """
+    if value is None:
+        return None
+    limit = (PROTO_INVALID - 1) / FIELD_SCALE[FIELD_KEYS.index(key)]
+    if value > limit:
+        if key not in _SATURATION_WARNED:
+            _SATURATION_WARNED.add(key)
+            log.warning('%s = %.2f 超出协议量程（该字段上限 %.2f），将一直显示 --；'
+                        '要显示这么大的值就得改协议缩放（两端一起改）',
+                        key, value, limit)
+        return None
+    return value
 
 
 def short_name(s: str) -> str:
@@ -269,9 +373,13 @@ def short_name(s: str) -> str:
                   r'|Threadripper\s+\w+|EPYC\s+\w+)', t, re.I)
     if m:
         return m.group(1).strip()
-    # GPU：RTX 4060 (Ti/SUPER) / GTX 1660 / RX 6800 XT / Arc A770
-    m = re.search(r'\b(RTX\s?\d{4}\s?(Ti|SUPER)?|GTX\s?\d{3,4}\s?(Ti|SUPER)?'
-                  r'|RX\s?\d{4}\s?(XT|XTX|GRE)?|Arc\s?[A-Z]\d{3})\b', t, re.I)
+    # GPU：RTX 4060 / 4070 Ti / 4070 Ti SUPER / 4070 SUPER / GTX 1660 Ti / RX 6800 XT / Arc A770
+    # 备选顺序必须是"长的在前"：只写 (Ti|SUPER)? 的话 "RTX 4070 Ti SUPER" 匹配到
+    # "RTX 4070 Ti" 就停了 —— 屏上认不出它是 SUPER 版，而 4070 Ti 和 4070 Ti SUPER
+    # 是两张性能不同的卡。（这个错误行为以前还被写进了测试的期望值里。）
+    m = re.search(r'\b(RTX\s?\d{4}\s?(?:Ti\s?SUPER|SUPER|Ti)?'
+                  r'|GTX\s?\d{3,4}\s?(?:Ti\s?SUPER|SUPER|Ti)?'
+                  r'|RX\s?\d{4}\s?(?:XTX|XT|GRE)?|Arc\s?[A-Z]\d{3})\b', t, re.I)
     if m:
         return m.group(1).strip()
     return t[:20].strip()
@@ -288,7 +396,10 @@ class RateMeter:
     def sample(self) -> float:
         try:
             cur = self.getter()
-            now = time.time()
+            # 用 monotonic 而不是墙钟：这里算的是"两次采样之间过了多久"，
+            # NTP 校时/跨夏令时会让这个差值变成负数或突然变大，速率随即变成一个
+            # 假尖峰（或负数）。
+            now = time.monotonic()
             if self.prev is not None and self.prev_t is not None and now > self.prev_t:
                 self.mbs = max(0.0, (cur - self.prev) / (now - self.prev_t) / (1024.0 * 1024.0))
             self.prev = cur
@@ -391,7 +502,7 @@ class RTSSReader:
             if not (16 <= entry_size <= 8192) or not (0 < arr_size <= 256):
                 return None, None
 
-            now = time.time()
+            now = time.monotonic()          # 同理：这是时间差，不能用墙钟
             dt = (now - self._prev_t) if self._prev_t else 0.0
             fg_pid = self._foreground_pid()
             best_fps = None
@@ -768,6 +879,14 @@ def _user_data_dir() -> str:
     return p
 
 
+def _sha256_file(path) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def find_presentmon_exe(configured: str = '') -> Optional[str]:
     """找 PresentMon console 可执行文件，返回绝对路径；找不到返回 None。
 
@@ -802,10 +921,23 @@ def find_presentmon_exe(configured: str = '') -> Optional[str]:
         if ok(src):
             dst = os.path.join(_user_data_dir(), PRESENTMON_EXE)
             try:
-                if (not os.path.isfile(dst)) or os.path.getsize(dst) != os.path.getsize(src):
+                # 判断"要不要重放"不能只看文件大小：同尺寸的损坏文件或被替换的文件
+                # 照样会被拿去执行，而它是从 %LOCALAPPDATA%（用户可写目录）启动的。
+                # 比照对象是**随包那份**，不是写死的官方常量 —— spec 明确允许用户
+                # 有意换成别的版本，那种情况下不该拦。
+                if not os.path.isfile(dst) or _sha256_file(dst) != _sha256_file(src):
                     import shutil
                     shutil.copy2(src, dst)
                     log.info('已把 PresentMon 释放到 %s', dst)
+                if _sha256_file(dst) != _sha256_file(src):
+                    log.error('PresentMon 副本与随包那份不一致（%s）—— 不执行它，'
+                              '改用临时目录里的副本，帧率显示 --', dst)
+                    return src
+                # 随包那份自己是不是官方版本：只提示，不拦（见上）
+                if _sha256_file(dst) != PRESENTMON_SHA256:
+                    log.warning('PresentMon 的 SHA256 与随包记录的官方值不同（%s）——'
+                                '如果是有意换的版本，忽略这条；否则建议重新下载',
+                                _sha256_file(dst))
                 return dst
             except Exception as e:
                 log.warning('释放 PresentMon 失败（%s），改用临时目录里的副本', e)
@@ -1076,7 +1208,7 @@ class PresentMonReader:
         EnumWindows 一次是毫秒级，1Hz 调用完全无所谓，但没必要每帧都枚举；
         而且缓存能让"选中哪个进程"在几秒内保持稳定，屏幕上不会来回跳。
         """
-        now = time.time()
+        now = time.monotonic()          # 缓存有效期，用墙钟会被校时打乱
         if self._win_cache is None or (now - self._win_cache_t) > 2.0:
             self._win_cache = _visible_window_pids()
             self._win_cache_t = now
@@ -1722,6 +1854,8 @@ class LibreHardwareMonitor:
         except Exception:
             proc_count = None
         try:
+            # 注意这里**必须**用墙钟：psutil.boot_time() 返回的是 epoch 时刻，
+            # 两个 epoch 相减才是开机时长；换成 monotonic 会得到一个没有意义的数。
             uptime_min = (time.time() - psutil.boot_time()) / 60.0
         except Exception:
             uptime_min = None
@@ -1749,15 +1883,15 @@ class LibreHardwareMonitor:
             'gpu_clk': self.gpu_clk,
             'gpu_mem_ctrl': self.gpu_memory_controller_load,
             'mobo_fan': self.mobo_fan,
-            'disk_read': disk_read,
-            'disk_write': disk_write,
+            'disk_read': _fit_field('disk_read', disk_read),
+            'disk_write': _fit_field('disk_write', disk_write),
             'disk_used': self.disk_used,
-            'net_down': net_down,
-            'net_up': net_up,
+            'net_down': _fit_field('net_down', net_down),
+            'net_up': _fit_field('net_up', net_up),
             'ping_ms': self.ping.ms,
             'ping_loss': self.ping.loss,
             'proc_count': proc_count,
-            'uptime_min': uptime_min,
+            'uptime_min': _fit_field('uptime_min', uptime_min),
             'frame_ms': frame_ms,
             'fps_low': fps_low,
         }
@@ -1765,7 +1899,7 @@ class LibreHardwareMonitor:
         # 周期性自检：报告有几个字段读不到。
         # 硬件传感器改名（驱动/固件更新后很常见）会让某些字段永久变成 --，
         # 而程序照常运行、照常发送 —— 这种"静默降级"以前完全看不出来。
-        now = time.time()
+        now = time.monotonic()          # 只用来算间隔，墙钟跳变会让自检忽快忽慢
         if now - self._last_report_t >= 60.0:
             self._last_report_t = now
             missing = [k for k, v in out.items() if v is None]
@@ -1836,8 +1970,10 @@ class BLESender:
         self.running = False
         self.reconnect_attempts = 0
         self.stats = {'sent': 0, 'failed': 0}
-        self.last_success_time = datetime.now()
-        self.start_time = datetime.now()  # 记录启动时间
+        # 下面所有"过了多久"的判断都拿这两个做差，所以必须用单调钟：
+        # 墙钟被 NTP 校时/跨夏令时一跳，差值会变成负数（超时永不触发，程序再也
+        # 不会自己退出）或者突然很大（立刻触发自动退出）。
+        self.last_success_time = time.monotonic()
 
     async def find_device(self) -> bool:
         try:
@@ -1854,13 +1990,18 @@ class BLESender:
 
     async def connect(self) -> bool:
         if not self.device:
-            return False
+            # 没有（或已失效的）device 就先扫一次。重连路径尤其需要这一步：
+            # ESP32 每次重启会换成随机 BLE 地址（没配固定地址的话），抱着上一次的
+            # device 对象重试**永远不会成功** —— 表现是"重连 3 次后程序退出"，
+            # 而设备其实就在旁边好好广播着。
+            if not await self.find_device():
+                return False
         try:
             self.client = BleakClient(self.device, timeout=Config.CONNECT_TIMEOUT)
             await self.client.connect()
             if self.client.is_connected:
                 self.reconnect_attempts = 0
-                self.last_success_time = datetime.now()  # 连接成功更新最后成功时间
+                self.last_success_time = time.monotonic()  # 连接成功更新最后成功时间
                 log.info('BLE 已连接')
                 return True
             log.warning('连接返回但 is_connected 为 False')
@@ -1886,7 +2027,7 @@ class BLESender:
                 payload = payload.encode()
             await self.client.write_gatt_char(self.char_uuid, payload)
             self.stats['sent'] += 1
-            self.last_success_time = datetime.now()  # 发送成功更新最后成功时间
+            self.last_success_time = time.monotonic()  # 发送成功更新最后成功时间
             return True
         except Exception as e:
             self.stats['failed'] += 1
@@ -1897,27 +2038,32 @@ class BLESender:
             return False
 
     async def run(self, monitor: LibreHardwareMonitor):
-        # 连接设备
-        if not await self.find_device():
-            log.warning('扫描不到设备，%d 分钟后自动退出（期间不会重试扫描）',
-                        Config.AUTO_EXIT_MINUTES)
-            await self._wait_for_timeout_or_exit()
-            log.info('等待超时，退出')
-            return
+        # 首次连接：扫描和连接都**重试**，总预算仍是 AUTO_EXIT_MINUTES。
+        # 旧行为是"扫一次，扫不到就干等 10 分钟然后退出"：ESP32 只是晚开机几秒、
+        # 或者在重启/刚刷完固件，程序就白白退出，用户看到的是"程序自己关了"。
+        deadline = time.monotonic() + Config.AUTO_EXIT_MINUTES * 60
+        while not await self.find_device():
+            if time.monotonic() >= deadline:
+                log.error('连续 %d 分钟扫描不到设备 "%s"，退出（ESP32 是否已上电并在广播？）',
+                          Config.AUTO_EXIT_MINUTES, self.device_name)
+                return
+            log.info('10 秒后重新扫描…')
+            await asyncio.sleep(10)
 
-        if not await self.connect():
-            log.warning('连接失败，%d 分钟后自动退出（期间不会重试连接）',
-                        Config.AUTO_EXIT_MINUTES)
-            await self._wait_for_timeout_or_exit()
-            log.info('等待超时，退出')
-            return
+        while not await self.connect():
+            if time.monotonic() >= deadline:
+                log.error('连续 %d 分钟连不上设备 "%s"，退出',
+                          Config.AUTO_EXIT_MINUTES, self.device_name)
+                return
+            log.info('10 秒后重试连接…')
+            await asyncio.sleep(10)
 
         # 网络延迟探测放后台跑（不阻塞采集）
         ping_task = asyncio.create_task(monitor.ping.run())
 
         # 连接后先发型号名，再发一个"全无效"的握手包确认协议通（不显示任何编造读数）
         await self.send_data(monitor.pack_names())
-        names_sent_at = time.time()
+        names_sent_at = time.monotonic()
         await self.send_data(monitor.pack_test())
         await asyncio.sleep(1)
 
@@ -1926,9 +2072,9 @@ class BLESender:
 
         while self.running:
             try:
-                # 检查是否超时（10分钟没有任何成功通信）
-                elapsed = datetime.now() - self.last_success_time
-                if elapsed.total_seconds() > Config.AUTO_EXIT_MINUTES * 60:
+                # 检查是否超时（AUTO_EXIT_MINUTES 分钟没有任何成功通信）
+                elapsed = time.monotonic() - self.last_success_time
+                if elapsed > Config.AUTO_EXIT_MINUTES * 60:
                     # 超时，自动退出
                     log.error('连续 %d 分钟没有任何成功通信，自动退出'
                               '（已发 %d 包，失败 %d 包）',
@@ -1948,15 +2094,18 @@ class BLESender:
                     if await self.connect():
                         # 重连后补发一次型号名
                         await self.send_data(monitor.pack_names())
-                        names_sent_at = time.time()
+                        names_sent_at = time.monotonic()
                         continue
+                    # 重连失败：丢掉旧的 device，下一轮 connect() 会重新扫描。
+                    # ESP32 每次重启换随机 BLE 地址，抱着旧对象重试永远不会成功。
+                    self.device = None
                     await asyncio.sleep(2)
                     continue
 
                 # 型号名低频重发（屏幕重连/重启后会用到）
-                if time.time() - names_sent_at > Config.NAMES_RESEND_SEC:
+                if time.monotonic() - names_sent_at > Config.NAMES_RESEND_SEC:
                     await self.send_data(monitor.pack_names())
-                    names_sent_at = time.time()
+                    names_sent_at = time.monotonic()
 
                 # 采集并发送数据
                 data = monitor.collect_all_data()
@@ -1975,16 +2124,10 @@ class BLESender:
         ping_task.cancel()
         await self.disconnect()
 
-    async def _wait_for_timeout_or_exit(self):
-        """等待超时后自动退出"""
-        # 等待10分钟，如果期间没有任何成功连接，自动退出
-        while True:
-            elapsed = datetime.now() - self.start_time
-            if elapsed.total_seconds() > Config.AUTO_EXIT_MINUTES * 60:
-                # 超时，退出
-                break
-            # 每隔1秒检查一次
-            await asyncio.sleep(1)
+
+# 注：原来这里还有一个 _wait_for_timeout_or_exit()：扫不到设备/连不上之后
+# "干等到 AUTO_EXIT_MINUTES 才退出，期间不做任何重试"。改成在上面 run() 里
+# 按 10 秒间隔重试扫描与连接（总预算仍是 AUTO_EXIT_MINUTES）之后，它没有调用者了。
 
 
 # ===== 主函数 =====

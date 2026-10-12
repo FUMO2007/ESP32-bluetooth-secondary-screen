@@ -26,6 +26,11 @@ test_out.txt
 # ---- 本机配置（入库的是模板 pc_monitor.ini.sample）----
 pc_monitor.ini
 
+# ---- 第三方二进制：deploy.ps1 的可选同步源，不入库 ----
+# LibreHardwareMonitor 的托管 DLL 集合（约 5 MB）。放在这里就会被 deploy.ps1
+# 同步到运行目录；不放也行，只要运行目录里已有那份。README 说明了从哪来。
+dlls/
+
 # ---- 时间戳备份 ----
 # 项目以前用 *.bak_<标签>_<时间戳> 充当"分支"，现在交给 git：
 #      git switch -c stage/<标签>

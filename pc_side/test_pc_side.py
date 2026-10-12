@@ -30,7 +30,12 @@ cases = [
     ("AMD Ryzen 5 5600X 6-Core Processor", "Ryzen 5 5600X"),
     ("Intel(R) Core(TM) Ultra 7 155H", "Ultra 7 155H"),
     ("NVIDIA GeForce RTX 4060", "RTX 4060"),
-    ("NVIDIA GeForce RTX 4070 Ti SUPER", "RTX 4070 Ti"),
+    # "Ti SUPER" 必须完整保留：以前的正则只写到 (Ti|SUPER)?，匹配到 "RTX 4070 Ti"
+    # 就停了 —— 屏幕上认不出这是更强的 SUPER 版，而 4070 Ti 与 4070 Ti SUPER
+    # 是两张性能不同的卡。这条期望值以前把错误行为固化了下来。
+    ("NVIDIA GeForce RTX 4070 Ti SUPER", "RTX 4070 Ti SUPER"),
+    ("NVIDIA GeForce RTX 4070 SUPER", "RTX 4070 SUPER"),
+    ("NVIDIA GeForce RTX 4070 Ti", "RTX 4070 Ti"),
     ("AMD Radeon RX 6800 XT", "RX 6800 XT"),
     ("Intel(R) Arc(TM) A770 Graphics", "Arc A770"),
 ]
@@ -334,6 +339,7 @@ print("\n=== 8) 打包后（onefile）PresentMon 的释放路径 ===")
 # 这里用假的 _MEIPASS + 假的 LOCALAPPDATA 把这段逻辑单独跑一遍。
 import tempfile
 import shutil as _shutil
+import hashlib as _hl
 
 _fake_mei = tempfile.mkdtemp(prefix='mei_')
 _fake_local = tempfile.mkdtemp(prefix='local_')
@@ -377,6 +383,55 @@ finally:
     m.Config.PRESENTMON_PATH = _saved_pm_path
     _shutil.rmtree(_fake_mei, ignore_errors=True)
     _shutil.rmtree(_fake_local, ignore_errors=True)
+
+print("\n=== 8b) 稳定目录里的缓存被改过就必须重放（只看大小是不够的）===")
+# 回归用：以前判断"要不要重新复制"只比文件大小，于是**同尺寸但内容不同**的缓存
+# 会被直接执行，而它是从 %LOCALAPPDATA%（用户可写目录）里启动的。
+_fake_mei2 = tempfile.mkdtemp(prefix='mei2_')
+_fake_local2 = tempfile.mkdtemp(prefix='local2_')
+_saved_meipass2 = getattr(sys, '_MEIPASS', None)
+_saved_localappdata2 = os.environ.get('LOCALAPPDATA')
+_saved_pm_path2 = m.Config.PRESENTMON_PATH
+_saved_sha2 = m.PRESENTMON_SHA256
+try:
+    _good = b'G' * 4096
+    _tampered = b'B' * 4096                      # 同样 4096 字节，内容不同
+    _src = os.path.join(_fake_mei2, m.PRESENTMON_EXE)
+    _dst_dir = os.path.join(_fake_local2, 'PCMonitor')
+    os.makedirs(_dst_dir)
+    _dst = os.path.join(_dst_dir, m.PRESENTMON_EXE)
+    with open(_src, 'wb') as _f:
+        _f.write(_good)
+    with open(_dst, 'wb') as _f:
+        _f.write(_tampered)
+
+    sys._MEIPASS = _fake_mei2
+    os.environ['LOCALAPPDATA'] = _fake_local2
+    m.Config.PRESENTMON_PATH = ''
+    m.PRESENTMON_SHA256 = _hl.sha256(_good).hexdigest()   # 当成"随包记录的官方值"
+    _got = m.find_presentmon_exe('')
+    with open(_dst, 'rb') as _f:
+        _after = _f.read()
+    check('同尺寸但内容不同的缓存被重新复制',
+          _after == _good, f'复制后是 {len(_after)} 字节、内容{"对" if _after == _good else "**不对**"}')
+    check('返回的就是稳定目录里那份（已修好）',
+          _got is not None and os.path.normcase(_got) == os.path.normcase(_dst), f'得到 {_got}')
+    check('哈希自检能发现被改过的文件',
+          _hl.sha256(_tampered).hexdigest() != _hl.sha256(_good).hexdigest())
+finally:
+    if _saved_meipass2 is None:
+        if hasattr(sys, '_MEIPASS'):
+            del sys._MEIPASS
+    else:
+        sys._MEIPASS = _saved_meipass2
+    if _saved_localappdata2 is None:
+        os.environ.pop('LOCALAPPDATA', None)
+    else:
+        os.environ['LOCALAPPDATA'] = _saved_localappdata2
+    m.Config.PRESENTMON_PATH = _saved_pm_path2
+    m.PRESENTMON_SHA256 = _saved_sha2
+    _shutil.rmtree(_fake_mei2, ignore_errors=True)
+    _shutil.rmtree(_fake_local2, ignore_errors=True)
 
 print("\n=== 9) 传感器名字匹配（这一层最容易出错）===")
 # 补课：cpu_volt 曾因为匹配规则没覆盖 AMD 的 "Core #1 VID" 而**永远读不到**，
@@ -477,6 +532,107 @@ if sys.platform == 'win32':
         check('close() 之后 handle 被清空', _job.handle is None)
 else:
     check('非 Windows 平台下不报错（handle 为 None）', _job.handle is None)
+
+print("\n=== 11) 超量程上报无效，而不是悄悄顶在 65534 ===")
+# 协议是定标 uint16（上限 65534）。以前超量程是**静默夹住**的：屏幕上是一个
+# 看起来很正常的数字，但它是错的（uptime 连续开机 45.5 天后永远显示 65534）。
+check('uptime_min 超过 65534 分钟（约 45.5 天）报无效',
+      m._fit_field('uptime_min', 70000.0) is None)
+check('uptime_min 正常值原样保留', m._fit_field('uptime_min', 1234.0) == 1234.0)
+check('net_down 超过 655.34 MB/s 报无效（万兆网卡跑满就到这儿）',
+      m._fit_field('net_down', 900.0) is None)
+check('net_down 正常值原样保留', m._fit_field('net_down', 12.5) == 12.5)
+check('disk_read 超过 6553.4 MB/s 报无效（PCIe 5.0 NVMe 能超）',
+      m._fit_field('disk_read', 8000.0) is None)
+check('None 原样返回（别把"读不到"变成别的意思）',
+      m._fit_field('net_up', None) is None)
+
+print("\n=== 12) ini 解析：BOM / 未知键 / 范围 / 枚举 ===")
+_ini_dir = tempfile.mkdtemp(prefix='ini_')
+_saved_ini = m._INI
+try:
+    _p = os.path.join(_ini_dir, 'pc_monitor.ini')
+    # encoding='utf-8-sig'：记事本里"UTF-8"另存会把 BOM 写进文件头。用 'utf-8' 读的话
+    # 第一个键会变成 '\ufeffPING_HOST' —— 不等于 'PING_HOST'，那一条就**静默失效**，
+    # 而且只有第一条会中招（最难发现）。
+    with open(_p, 'w', encoding='utf-8-sig') as _f:
+        _f.write('PING_HOST = 1.2.3.4\nCOLLECT_INTERVAL = 2.0\nNOT_A_KEY = 5\n')
+    _cfg = m._load_ini(_p)
+    check('带 BOM 的 ini 第一个键能正确读到（不是 \\ufeffPING_HOST）',
+          _cfg.get('PING_HOST') == '1.2.3.4', f'读到的键: {sorted(_cfg)}')
+    check('键名统一转成大写', 'COLLECT_INTERVAL' in _cfg and _cfg['COLLECT_INTERVAL'] == '2.0',
+          f'{sorted(_cfg)}')
+
+    # 模拟"程序读了一部分键"：没被读过的键必须能识别出来
+    _cfg.get('PING_HOST')
+    check('写了但没被读的键能被识别出来（键名拼错就靠这个）',
+          sorted(set(_cfg) - _cfg.used) == ['COLLECT_INTERVAL', 'NOT_A_KEY'],
+          f'{sorted(set(_cfg) - _cfg.used)}')
+
+    # 范围与枚举校验：都是"改一个数字就能造成的难查故障"
+    m._INI = m._IniValues()
+    m._INI.update({'COLLECT_INTERVAL': '0'})
+    check('COLLECT_INTERVAL=0 被夹到下限（否则主循环满速忙等）',
+          m._ini_ranged('COLLECT_INTERVAL', 1.0, 0.1, 60.0) == 0.1,
+          f'{m._ini_ranged("COLLECT_INTERVAL", 1.0, 0.1, 60.0)}')
+    m._INI = m._IniValues()
+    m._INI.update({'PING_WINDOW': '0'})
+    check('PING_WINDOW=0 被夹到 1（否则丢包率分母为 0）',
+          m._ini_ranged('PING_WINDOW', 10, 1, 1000, integer=True) == 1)
+    m._INI = m._IniValues()
+    m._INI.update({'FPS_SOURCE': 'presentmno'})
+    check('FPS_SOURCE 拼错会退回默认值（以前静默失效 -> 帧率永远 --）',
+          m._ini_choice('FPS_SOURCE', 'auto', ('auto', 'presentmon', 'rtss', 'none')) == 'auto')
+    m._INI = m._IniValues()
+    m._INI.update({'FPS_SOURCE': 'RTSS'})
+    check('枚举值大小写不敏感',
+          m._ini_choice('FPS_SOURCE', 'auto', ('auto', 'presentmon', 'rtss', 'none')) == 'rtss')
+    m._INI = m._IniValues()
+    m._INI.update({'PROTOCOL': 'text'})
+    check('PROTOCOL 只认 binary/csv，其它回退 binary',
+          m._ini_choice('PROTOCOL', 'binary', ('binary', 'csv')) == 'binary')
+finally:
+    m._INI = _saved_ini
+    _shutil.rmtree(_ini_dir, ignore_errors=True)
+
+print("\n=== 13) 重连前必须重新扫描（ESP32 重启会换随机 BLE 地址）===")
+# 回归用：connect() 以前是 `if not self.device: return False`，而重连路径永远带着
+# 上一次的 device 对象 —— ESP32 一重启（刷固件/断电）地址就变了，于是 3 次重连
+# 全部失败后程序直接退出，而设备其实就在旁边好好广播着。
+import asyncio as _aio
+
+
+class _FakeBleakClient:
+    def __init__(self, device, timeout=None):
+        self.device = device
+        self.is_connected = False
+
+    async def connect(self):
+        self.is_connected = True
+
+
+_orig_client = m.BleakClient
+try:
+    m.BleakClient = _FakeBleakClient
+    _s = m.BLESender.__new__(m.BLESender)      # 不走 __init__（不必碰 Config/日志）
+    _s.device = None                           # 地址已失效
+    _s.reconnect_attempts = 3
+    _s.last_success_time = 0.0
+    _scans = []
+
+    async def _fake_find():
+        _scans.append(1)
+        _s.device = object()                   # 扫到了"新地址"
+        return True
+
+    _s.find_device = _fake_find
+    _ok = _aio.run(_s.connect())
+    check('device 为空时会先重新扫描（旧代码在这里直接 return False）',
+          bool(_ok) and len(_scans) == 1, f'扫描 {len(_scans)} 次, 连接结果 {_ok}')
+    check('连接成功后重连计数清零', _s.reconnect_attempts == 0,
+          f'{_s.reconnect_attempts}')
+finally:
+    m.BleakClient = _orig_client
 
 print(f"\n{'==== 全部通过 ====' if not fails else '==== 有失败: ' + ', '.join(fails) + ' ===='}")
 sys.exit(1 if fails else 0)

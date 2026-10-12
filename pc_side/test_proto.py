@@ -21,7 +21,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from proto_v2 import (pack_binary, pack_names, unpack_binary, crc8, pack_field,
-                      PROTO_FIELD_COUNT, FIELD_KEYS, FIELD_SCALE, PROTO_INVALID)
+                      PROTO_FIELD_COUNT, FIELD_KEYS, FIELD_SCALE, PROTO_INVALID,
+                      PROTO_NAME_MAX, PROTO_NAME_BYTES_MAX)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HEADER_PATH = os.path.normpath(
@@ -188,7 +189,10 @@ def self_check():
         if want is None:
             continue
         tol = tol_of(i)
-        check(f'{k}: {got} ≈ {want} (tol {tol:g})', abs(got - want) <= tol)
+        # got 为 None 时不能直接减：以前 abs(None - want) 会抛 TypeError，
+        # 测试是"崩掉"而不是"FAIL"，看起来像测试本身坏了。
+        check(f'{k}: {got} ≈ {want} (tol {tol:g})',
+              got is not None and abs(got - want) <= tol)
 
     print('\n=== 2) 哨兵与合法 0 ===')
     back2 = unpack_binary(pack_binary(SAMPLE_WITH_INVALID, seq=SEED_INVALID))
@@ -222,6 +226,45 @@ def self_check():
     check(f'缩放退化解落在"旧容差放过、新容差抓住"的窗口（得 {degraded}，误差 {err:g}）',
           new_tol < err < 0.06,
           f'x100 新容差 {new_tol:g} < 误差 {err:g} < 旧容差 0.06')
+
+    print('\n=== 5) 脏数据不能把整包打挂 ===')
+    # inf 以前会一路走到 int(round(inf)) 抛 OverflowError：那一轮**一包都发不出去**，
+    # 屏幕上整片变 --，日志里却是每秒一条的全栈（看着像程序崩了）。
+    i_net = FIELD_KEYS.index('net_down')
+    for bad, name in ((float('inf'), '+inf'), (float('-inf'), '-inf'), (float('nan'), 'NaN')):
+        try:
+            raw = pack_field(bad, i_net)
+            check(f'{name} -> 哨兵（不抛异常）', raw == PROTO_INVALID, f'raw={raw}')
+        except Exception as e:
+            check(f'{name} -> 哨兵（不抛异常）', False, f'{type(e).__name__}: {e}')
+    check('超大但有限的值撞量程上限，不是哨兵',
+          pack_field(1e30, i_net) == PROTO_INVALID - 1,
+          f'raw={pack_field(1e30, i_net)}')
+
+    print('\n=== 6) 名称包按字符截断（不能切断多字节字符）===')
+    # 以前是 (cpu + '|' + gpu).encode('utf-8')[:120]：按字节切会把中文型号名切成
+    # 非法 UTF-8；切在 '|' 前面时固件找不到分隔符，GPU 名整个丢掉。
+    long_cpu = '锐龙' * 30          # 远超 23 字符，且是多字节
+    long_gpu = '影驰' * 30
+    pkt = pack_names(long_cpu, long_gpu)
+    text = pkt[2:-1]
+    check('名称包长度字段与实际内容一致', pkt[1] == len(text), f'{pkt[1]} vs {len(text)}')
+    try:
+        decoded = text.decode('utf-8')
+        ok_utf8 = True
+    except UnicodeDecodeError:
+        decoded, ok_utf8 = '', False
+    check('内容是合法 UTF-8（没被从字符中间切断）', ok_utf8, repr(decoded[:20]))
+    check("分隔符 '|' 还在（否则固件会把 GPU 名整个丢掉）", '|' in decoded, repr(decoded))
+    if '|' in decoded:
+        c, g = decoded.split('|', 1)
+        check(f'CPU 名压到 {PROTO_NAME_MAX - 1} 字符以内', len(c) <= PROTO_NAME_MAX - 1, f'{len(c)}')
+        check(f'GPU 名压到 {PROTO_NAME_MAX - 1} 字符以内', len(g) <= PROTO_NAME_MAX - 1, f'{len(g)}')
+    check('名称包不超过一个 BLE 写的上限（超过就会碎包，固件收不到）',
+          len(text) <= PROTO_NAME_BYTES_MAX, f'{len(text)} 字节')
+    # 只按"每边 23 字符"留是 139 字节，超出 MTU 128 的有效载荷 —— 这条断言就是
+    # 防止有人把字节上限当成多余的限制又去掉。
+    check('中文型号名（每边 30 个汉字）确实触发了收紧', len(text) < 139, f'{len(text)} 字节')
 
 
 def main():
