@@ -40,6 +40,15 @@ jobs:
         # 环境保持一致（真正需要它们的是 Windows 专有的 test_pc_side.py）。
         run: python -m pip install --upgrade pip psutil==7.2.2 bleak==3.0.2
 
+      # ---------------------------------------------------------------- 产物目录
+      # **必须显式建**：build_out/ 被 .gitignore 挡住，仓库里不存在，而 ld 不会
+      # 自动创建输出目录 —— 第 4 步会直接报
+      #   /usr/bin/ld: 无法打开输出文件 build_out/proto_test: 没有这样的文件或目录
+      # 本地没暴露这个问题，是因为 build.ps1 开头有 New-Item -Force 先建了目录。
+      # 另外第 5 步的 preview 按相对路径写 *.bmp，工作目录也设在这里。
+      - name: 准备产物目录 build_out/
+        run: mkdir -p build_out
+
       # ---------------------------------------------------------------- 1) 金标向量
       # 顺序很重要：**先 check 再生成**。反过来的话刚写出的文件当然是最新的，
       # 那个检查永远不会失败，等于没有（build.ps1 里专门记着这个教训）。
@@ -64,6 +73,7 @@ jobs:
       - name: 4) 协议跨语言测试 (Python 编码 -> C++ 解码)
         run: |
           set -e
+          mkdir -p build_out
           g++ -std=gnu++11 -Wall -Wextra -I tools/ui_preview -I PC_Monitor \
               tools/ui_preview/proto_test.cpp PC_Monitor/proto.cpp \
               -o build_out/proto_test
@@ -75,6 +85,7 @@ jobs:
       - name: 5) UI 仿真渲染 + 画面断言
         run: |
           set -e
+          mkdir -p build_out
           g++ -std=gnu++11 -O0 -DFORCE_PAGE=0 -I tools/ui_preview -I PC_Monitor \
               tools/ui_preview/preview_impl.cpp tools/ui_preview/preview_main.cpp \
               PC_Monitor/screen_draw.cpp PC_Monitor/proto.cpp \
